@@ -116,6 +116,7 @@ jobs:
           & caproom --limit 512 -- node -e "process.exit(3)"
           Write-Host "propagated exit code: $LASTEXITCODE"
           if ($LASTEXITCODE -ne 3) { throw "expected 3, got $LASTEXITCODE" }
+          exit 0
 
       - name: cap actually enforces
         shell: pwsh
