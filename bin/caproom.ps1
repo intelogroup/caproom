@@ -357,16 +357,22 @@ function Invoke-Capped {
                 [Runtime.InteropServices.Marshal]::FreeHGlobal($ptr)
             }
 
-            # Assign THIS process to the job before spawning. Children are
-            # associated automatically at CreateProcess time, so the cap is live
-            # before the child runs a single instruction -- assigning the child
-            # after Start-Process leaves a window where it can already allocate.
-            if (-not [Caproom]::AssignProcessToJobObject($job, [Diagnostics.Process]::GetCurrentProcess().Handle)) {
+            # Assign ONLY the child to the job, immediately after spawn --
+            # never caproom's own process. Putting the PowerShell runtime
+            # inside the job made its ~100MB+ commit eat the user's budget,
+            # and a PS spike could fail allocations inside THEIR command.
+            # Policy: prefer under-counting over impeding. Cost is a
+            # millisecond-scale window before assignment lands; the child's
+            # own descendants are still covered automatically (they inherit
+            # the association at CreateProcess).
+            [Console]::Error.WriteLine("caproom: job object backend, limit=${LimitMb}m (committed memory, kernel-enforced, covers the command and its descendants)")
+            $proc = New-CappedProcess -Exe $exe -ArgLine $rest
+            if (-not [Caproom]::AssignProcessToJobObject($job, $proc.Handle)) {
+                # Child is already running -- kill it before falling back,
+                # or the watchdog path below would launch a second instance.
+                & taskkill.exe /PID $proc.Id /T /F 2>$null | Out-Null
                 throw "AssignProcessToJobObject failed (error $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
             }
-
-            [Console]::Error.WriteLine("caproom: job object backend, limit=${LimitMb}m (committed memory, kernel-enforced, includes child processes)")
-            $proc = New-CappedProcess -Exe $exe -ArgLine $rest
             exit (Wait-CappedProcess $proc)
         } catch {
             [Console]::Error.WriteLine("caproom: job object backend unavailable ($($_.Exception.Message)) -- falling back to watchdog")
