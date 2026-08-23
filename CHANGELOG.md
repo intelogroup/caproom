@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.7.2 — 2026-08-23
+
+### Fixed
+- **Terminal restoration after a watchdog kill.** A TUI child (opencode, claude) puts the tty in raw + mouse-tracking mode; when caproom killed it, nothing turned those modes off and the user's shell echoed SGR mouse reports (`[[<35;25;15M`) as garbage until a manual `reset`. caproom now snapshots termios before spawn and, on its kill paths only (SIGKILL sweep and TERM-honored grace exit), restores termios and emits alt-screen-off / mouse-1000-1002-1003-1006-off / bracketed-paste-off / cursor-on. Clean exits untouched.
+- **Windows `watch` was fundamentally broken**: arguments splatted into `$args` read back all-null inside `Invoke-Watch`, so thresholds/pids parsed to 0 — the watcher watched pid 0 with a busy-spinning interval-0 loop that never exited (and broke MCP `watch_start` on win32). Args now arrive via a named `[string[]]` parameter with a 0.5s interval floor.
+- Windows arg parsing now accepts the `--` separator like POSIX does.
+
+### CI
+- Windows watch step is bounded (25s `WaitForExit`) instead of able to hang a runner indefinitely, and asserts the started event's content including non-zero pid parsing.
+
+## 0.7.1 — 2026-08-23
+
+### Fixed
+- postinstall hint moved to `scripts/postinstall.js`: the inline `node -e` string carried backticks, so shells command-substituted `` `caproom setup` `` during global installs and spliced its output into the JS — SyntaxError, install exit 1.
+
 ## 0.7.0 — 2026-08-23
 
 ### Added
