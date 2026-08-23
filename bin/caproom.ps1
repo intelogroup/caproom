@@ -252,17 +252,52 @@ function New-CappedProcess {
     return $proc
 }
 
+function Read-NewOutput {
+    # Tail-follow one capture file from its recorded byte offset, writing new
+    # bytes to the given console stream as they land so output streams live.
+    # Byte-level writes pass the child's bytes through un-re-encoded.
+    param([string]$Path, $Offsets, $Stream)
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $fs = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    try {
+        if ($fs.Length -lt $Offsets[$Path]) { $Offsets[$Path] = 0 }   # file truncated/recreated under us
+        if ($fs.Length -gt $Offsets[$Path]) {
+            $fs.Position = $Offsets[$Path]
+            $len = [int]($fs.Length - $fs.Position)
+            $buf = New-Object byte[] $len
+            $read = 0
+            while ($read -lt $len) {
+                $n = $fs.Read($buf, $read, $len - $read)
+                if ($n -le 0) { break }
+                $read += $n
+            }
+            if ($read -gt 0) {
+                $Offsets[$Path] += $read
+                $Stream.Write($buf, 0, $read)
+                $Stream.Flush()
+            }
+        }
+    } finally { $fs.Close() }
+}
+
 function Wait-CappedProcess {
-    # Call once the caller is done polling / ready to block. Relays whatever
-    # the child wrote verbatim and returns the exit code.
+    # Streams stdout/stderr LIVE by tail-following both temp files while the
+    # child runs (50ms cadence), then drains whatever landed last and returns
+    # the exit code. Call once the caller is done polling / ready to block.
     param($Proc)
-    $Proc.WaitForExit()
-    $out = Get-Content -Raw -Path $Proc.StdoutFile -ErrorAction SilentlyContinue
-    $err = Get-Content -Raw -Path $Proc.StderrFile -ErrorAction SilentlyContinue
-    Remove-Item -Path $Proc.StdoutFile, $Proc.StderrFile -ErrorAction SilentlyContinue
-    if ($out) { [Console]::Out.Write($out) }
-    if ($err) { [Console]::Error.Write($err) }
-    return $Proc.ExitCode
+    try {
+        $offsets = @{ ($Proc.StdoutFile) = 0; ($Proc.StderrFile) = 0 }
+        while (-not $Proc.HasExited) {
+            Read-NewOutput -Path $Proc.StdoutFile -Offsets $offsets -Stream ([Console]::Out)
+            Read-NewOutput -Path $Proc.StderrFile -Offsets $offsets -Stream ([Console]::Error)
+            Start-Sleep -Milliseconds 50
+        }
+        Read-NewOutput -Path $Proc.StdoutFile -Offsets $offsets -Stream ([Console]::Out)
+        Read-NewOutput -Path $Proc.StderrFile -Offsets $offsets -Stream ([Console]::Error)
+        return $Proc.ExitCode
+    } finally {
+        Remove-Item -LiteralPath $Proc.StdoutFile, $Proc.StderrFile -ErrorAction SilentlyContinue
+    }
 }
 
 function Invoke-Capped {
