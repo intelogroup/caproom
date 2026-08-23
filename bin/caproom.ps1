@@ -195,7 +195,7 @@ function Invoke-Init {
 # override per-shell: `$env:CAPROOM_LIMIT_MB = 8192
 function ${Target}_capped {
     `$limit = if (`$env:CAPROOM_LIMIT_MB) { `$env:CAPROOM_LIMIT_MB } else { $LimitMb }
-    caproom --limit `$limit -- $Target @args
+    caproom --force-watchdog --limit `$limit -- $Target @args
 }
 Set-Alias -Name $Target -Value ${Target}_capped -Force
 "@
