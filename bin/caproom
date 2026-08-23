@@ -114,10 +114,68 @@ cmd_status() {
   ps -o pid,stat,rss,etime,command -p "$pid" 2>/dev/null || { echo "caproom: no such pid $pid" >&2; exit 1; }
 }
 
+mem_free_pct() {
+  if [[ "$(uname)" == "Darwin" ]]; then
+    local page_size free inactive total_bytes avail_bytes
+    page_size=$(vm_stat | awk '/page size of/ {print $8}')
+    free=$(vm_stat | awk '/Pages free/ {gsub("\\.","",$3); print $3}')
+    inactive=$(vm_stat | awk '/Pages inactive/ {gsub("\\.","",$3); print $3}')
+    total_bytes=$(sysctl -n hw.memsize)
+    avail_bytes=$(( (free + inactive) * page_size ))
+    echo $(( avail_bytes * 100 / total_bytes ))
+  else
+    local avail_kb total_kb
+    avail_kb=$(awk '/MemAvailable/ {print $2}' /proc/meminfo)
+    total_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+    echo $(( avail_kb * 100 / total_kb ))
+  fi
+}
+
+cmd_guard() {
+  local threshold=10
+  local interval=5
+  local pids=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --threshold) threshold="$2"; shift 2 ;;
+      --interval) interval="$2"; shift 2 ;;
+      --) shift ;;
+      *) pids+=("$1"); shift ;;
+    esac
+  done
+  [[ ${#pids[@]} -eq 0 ]] && { echo "usage: caproom guard [--threshold <pct>] [--interval <sec>] <pid...>" >&2; exit 1; }
+  echo "caproom: guarding ${#pids[@]} pid(s), park when system free mem < ${threshold}% (poll ${interval}s)" >&2
+  local parked=()
+  while :; do
+    local alive=()
+    local pid
+    for pid in "${pids[@]}"; do
+      kill -0 "$pid" 2>/dev/null && alive+=("$pid")
+    done
+    if [[ ${#alive[@]} -eq 0 ]]; then
+      echo "caproom: guard: all watched pids exited" >&2
+      exit 0
+    fi
+    pids=("${alive[@]}")
+    local pct
+    pct=$(mem_free_pct)
+    if [[ "$pct" -lt "$threshold" ]]; then
+      for pid in "${pids[@]}"; do
+        if [[ ! " ${parked[*]:-} " == *" $pid "* ]]; then
+          echo "caproom: system free mem ${pct}% < ${threshold}% threshold — about to blow, parking pid $pid (SIGSTOP)" >&2
+          kill -STOP "$pid" 2>/dev/null && parked+=("$pid")
+        fi
+      done
+    fi
+    sleep "$interval"
+  done
+}
+
 case "${1:-}" in
   park) shift; cmd_park "$@"; exit 0 ;;
   wake) shift; cmd_wake "$@"; exit 0 ;;
   status) shift; cmd_status "$@"; exit 0 ;;
+  guard) shift; cmd_guard "$@"; exit 0 ;;
   init) shift; cmd_init "$@"; exit 0 ;;
   help|-h|--help) usage help ;;
 esac

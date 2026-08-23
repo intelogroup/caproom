@@ -19,6 +19,7 @@ usage: caproom [--limit <mb>] [--interval <sec>] -- <command> [args...]
        caproom park <pid>
        caproom wake <pid>
        caproom status <pid>
+       caproom guard [--threshold <pct>] [--interval <sec>] <pid...>
        caproom init <command> [--limit <mb>]
 
   --limit <mb>     memory cap in MB (default: 4096). On Windows this caps
@@ -37,11 +38,20 @@ Windows differences from macOS/Linux:
   * wake <pid> is a no-op -- nothing was suspended. Trimmed pages fault back
     in by themselves on next access.
 
+guard watches SYSTEM-WIDE free memory (not any single process) and auto-parks
+tracked pids (EmptyWorkingSet) once free mem drops below --threshold percent,
+before the OS has to fail an allocation itself. Use it when unrelated heavy
+processes (e.g. a GPU inference job and a TTS job in separate terminals)
+share a box and neither individually breaches any --limit cap. Foreground,
+blocking; exits once all watched pids have exited. There is no unpark step --
+park just trims the working set, pages fault back in on next access.
+
 env vars (override flags): CAPROOM_LIMIT_MB, CAPROOM_INTERVAL
 
 examples:
   caproom --limit 2048 -- npm run build
   caproom park 12345
+  caproom guard --threshold 10 --interval 5 -- 12345 12346
   caproom init claude --limit 6144
 '@
     if ($AsHelp) { Write-Output $text; exit 0 }
@@ -142,6 +152,40 @@ function Invoke-Status {
         Elapsed       = (Get-Date) - $proc.StartTime
         Command       = $proc.ProcessName
     } | Format-List
+}
+
+function Get-FreeMemPercent {
+    $os = Get-CimInstance Win32_OperatingSystem
+    return [math]::Floor(($os.FreePhysicalMemory * 100) / $os.TotalVisibleMemorySize)
+}
+
+function Invoke-Guard {
+    param([int]$Threshold, [double]$Interval, [int[]]$TargetPids)
+    Import-Native
+    [Console]::Error.WriteLine("caproom: guarding $($TargetPids.Count) pid(s), park when system free mem < ${Threshold}% (poll ${Interval}s)")
+    $parked = @{}
+    while ($true) {
+        $alive = @($TargetPids | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+        if ($alive.Count -eq 0) {
+            [Console]::Error.WriteLine("caproom: guard: all watched pids exited")
+            exit 0
+        }
+        $TargetPids = $alive
+        $pct = Get-FreeMemPercent
+        if ($pct -lt $Threshold) {
+            foreach ($p in $TargetPids) {
+                if (-not $parked.ContainsKey($p)) {
+                    $proc = Get-Process -Id $p -ErrorAction SilentlyContinue
+                    if ($proc) {
+                        [Console]::Error.WriteLine("caproom: system free mem ${pct}% < ${Threshold}% threshold -- about to blow, parking pid $p (EmptyWorkingSet)")
+                        [void][Caproom]::EmptyWorkingSet($proc.Handle)
+                        $parked[$p] = $true
+                    }
+                }
+            }
+        }
+        Start-Sleep -Seconds $Interval
+    }
 }
 
 function Invoke-Init {
@@ -303,6 +347,21 @@ switch ($args[0]) {
     'status' {
         if ($args.Count -lt 2) { [Console]::Error.WriteLine('usage: caproom status <pid>'); exit 1 }
         Invoke-Status -TargetPid ([int]$args[1]); exit 0
+    }
+    'guard'  {
+        if ($args.Count -lt 2) { [Console]::Error.WriteLine('usage: caproom guard [--threshold <pct>] [--interval <sec>] <pid...>'); exit 1 }
+        $threshold = 10
+        $gInterval = 5
+        $gPids = @()
+        for ($i = 1; $i -lt $args.Count; $i++) {
+            if ($args[$i] -eq '--threshold') { $threshold = [int]$args[$i + 1]; $i++ }
+            elseif ($args[$i] -eq '--interval') { $gInterval = [double]$args[$i + 1]; $i++ }
+            elseif ($args[$i] -eq '--') { continue }
+            else { $gPids += [int]$args[$i] }
+        }
+        if ($gPids.Count -eq 0) { [Console]::Error.WriteLine('usage: caproom guard [--threshold <pct>] [--interval <sec>] <pid...>'); exit 1 }
+        Invoke-Guard -Threshold $threshold -Interval $gInterval -TargetPids $gPids
+        exit 0
     }
     'init'   {
         if ($args.Count -lt 2) { [Console]::Error.WriteLine('usage: caproom init <command> [--limit <mb>]'); exit 1 }
