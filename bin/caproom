@@ -15,6 +15,7 @@ usage: caproom [--limit <mb>] [--image <docker-image>] [--interval <sec>] -- <co
        caproom park <pid>
        caproom wake <pid>
        caproom status <pid>
+       caproom init <command> [--limit <mb>] [--grace <sec>]
 
   --limit <mb>     memory cap in MB (default: 4096)
   --image <name>   docker image to run the command in, when using the docker
@@ -35,6 +36,12 @@ becomes eligible for compression under system memory pressure. `caproom wake
 Any agent can call these directly — they're just SIGSTOP/SIGCONT, no daemon,
 no tracking file required.
 
+init <command> — print a shell snippet that auto-caps <command> on every
+invocation, so a new terminal tab is capped with no extra typing. Append the
+output to your shell rc (~/.zshrc, ~/.bashrc):
+
+  caproom init claude >> ~/.zshrc && source ~/.zshrc
+
 env vars (override flags): CAPROOM_LIMIT_MB, CAPROOM_IMAGE, CAPROOM_INTERVAL, CAPROOM_GRACE
 
 examples:
@@ -42,8 +49,33 @@ examples:
   caproom --limit 512 -- claude --dangerously-skip-permissions -p "task"
   caproom park 12345
   caproom wake 12345
+  caproom init claude --limit 6144 --grace 10
 EOF
   exit 1
+}
+
+cmd_init() {
+  local target="${1:-}"
+  [[ -z "$target" ]] && { echo "usage: caproom init <command> [--limit <mb>] [--grace <sec>]" >&2; exit 1; }
+  shift
+  local limit=4096
+  local grace=5
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --limit) limit="$2"; shift 2 ;;
+      --grace) grace="$2"; shift 2 ;;
+      *) echo "caproom: unknown init flag $1" >&2; exit 1 ;;
+    esac
+  done
+  local fn="${target}_capped"
+  cat << EOF
+# caproom: auto-cap '$target' — added by 'caproom init $target'
+# override per-shell: CAPROOM_LIMIT_MB=8192 $target ...
+$fn() {
+  command caproom --limit "\${CAPROOM_LIMIT_MB:-$limit}" --force-watchdog --grace "\${CAPROOM_GRACE:-$grace}" -- command $target "\$@"
+}
+alias $target=$fn
+EOF
 }
 
 cmd_park() {
@@ -72,6 +104,7 @@ case "${1:-}" in
   park) shift; cmd_park "$@"; exit 0 ;;
   wake) shift; cmd_wake "$@"; exit 0 ;;
   status) shift; cmd_status "$@"; exit 0 ;;
+  init) shift; cmd_init "$@"; exit 0 ;;
 esac
 
 LIMIT_MB="${CAPROOM_LIMIT_MB:-4096}"
