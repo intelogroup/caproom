@@ -18,7 +18,7 @@ caproom --limit <mb> -- <command> [args...]
 Two backends, auto-selected:
 
 1. **Docker cgroup** (`--memory`) — used when Docker is installed and running. Hard cap, real kernel enforcement, zero race window.
-2. **Polling watchdog** (`ps` RSS + `SIGKILL`) — fallback when Docker isn't available. No dependencies, works anywhere `ps` exists. Has a small race window bounded by `--interval` (default 200ms) — a process can spike briefly past the cap between polls before being killed.
+2. **Polling watchdog** (`ps` RSS + `SIGKILL`) — fallback when Docker isn't available. No dependencies, works anywhere `ps` exists. Measures the **whole process tree** each poll (agents keep their memory in children — MCP servers, bundler daemons, headless browsers — while the parent's own RSS stays flat). Has a small race window bounded by `--interval` (default 200ms) — memory can spike briefly past the cap between polls before the kill lands.
 
 ## Install
 
@@ -57,6 +57,32 @@ caproom --limit 4096 --image python:3.12-slim -- python train.py
 Env var overrides: `CAPROOM_LIMIT_MB`, `CAPROOM_IMAGE`, `CAPROOM_INTERVAL`, `CAPROOM_GRACE`.
 
 On cap breach, the watchdog backend sends `SIGTERM` first and waits `--grace` seconds before `SIGKILL`. If the process exits cleanly during the grace window, `caproom` propagates its real exit code; only a hard `SIGKILL` (process ignored `SIGTERM`, or grace ran out) reports `137` (same convention as Docker's own OOM-kill exit code, which the docker backend always uses on breach since Docker itself sends the kill).
+
+## Backends compared
+
+The three enforcement mechanisms measure different quantities and cover children differently. Read this before reusing a `--limit` number across platforms or backends:
+
+| | Docker cgroup | Windows Job Object | Watchdog (POSIX) | Watchdog (Windows) |
+|---|---|---|---|---|
+| Measures | cgroup memory | **committed virtual memory** | RSS of the process tree | working set of the process tree |
+| Children counted | yes — whole container | yes — auto-inherited at spawn | yes — tree walked each poll | yes — tree walked each poll |
+| Enforcement | kernel OOM-kill | allocation fails in-process | TERM → grace → KILL | hard kill (`taskkill /T /F`) |
+| Race window | none | none | bounded by `--interval` | bounded by `--interval` |
+| Interactive/streaming output | degraded — no TTY (`-i` only) | full — streamed live | full — child inherits the tty | streamed live via temp-file tail-follow (~50ms cadence) |
+
+**Committed vs RSS**: Node/V8 runtimes commit far more virtual memory than they touch, so a limit tuned against RSS on macOS will bite much earlier under the Job Object backend. Tune per platform.
+
+### Docker backend caveats
+
+The command runs inside `node:22-slim` with `$PWD` mounted at `/work` — it is a Linux container, not your host shell:
+
+- Native modules built for macOS (`esbuild`, `swc`, `sharp`) fail with exec-format errors inside the container.
+- Host toolchain, env vars, git credentials, and `~/.ssh` are not present.
+- The image pins Node 22 regardless of your project's version (`--image` to override).
+- No TTY is allocated, so interactive/TUI programs degrade; Docker Desktop's file-share layer slows large builds on macOS.
+
+For capping an AI agent session you want to *interact* with, prefer the watchdog (`--force-watchdog`): same host environment, streaming output, no container drift.
+
 
 ## init — auto-cap a command on every launch
 
@@ -99,7 +125,9 @@ Windows uses a separate PowerShell backend, selected automatically. Same command
 
 **`--limit` means committed memory on Windows, RSS on macOS/Linux.** These are different quantities. The same number will bite at a different point, so tune it per platform rather than assuming it transfers.
 
-**No grace period.** Windows console apps have no `SIGTERM` equivalent. Under the Job Object backend nothing is killed at all — the allocation just fails inside the process. Under the watchdog fallback, `Stop-Process` is a hard kill with no chance to flush state. `--grace` is accepted and ignored.
+**No grace period.** Windows console apps have no `SIGTERM` equivalent. Under the Job Object backend nothing is killed at all — the allocation just fails inside the process. Under the watchdog fallback, a breach kills the whole tree (`taskkill /T /F`) with no chance to flush state. `--grace` is accepted and ignored.
+
+**Watchdog output streams, but through temp files.** stdout/stderr are captured to files and tail-followed (~50ms cadence) so logs and CI steps show progress live. Full-screen TUI redraws are not pixel-perfect over this path; plain streaming output (agents in non-interactive mode, builds) works normally.
 
 **`park` does not suspend on Windows.** It calls `EmptyWorkingSet`, which trims the process's working set to the pagefile immediately and on demand — no waiting for system memory pressure, and **the process keeps running**. The macOS caveat about never parking a process an agent is waiting on does not apply here. `caproom wake` is therefore a no-op on Windows; trimmed pages fault back in on next access.
 
@@ -114,8 +142,9 @@ Docker backend is not wired up on Windows — the Job Object path already gives 
 ## Limitations
 
 - Docker backend mounts `$PWD` into the container at `/work` and runs there — paths outside `$PWD` aren't visible to the command.
-- Watchdog backend has a real (if small) race window; for a hard guarantee, use the Docker backend.
-- On macOS/Linux the watchdog only tracks the direct child, so a process that forks and hides work under a separate PID tree escapes the cap. The Windows Job Object backend does not have this gap.
+- Watchdog backends have a real (if small) race window; for a hard guarantee, use the Docker backend (POSIX) or the Job Object backend (Windows).
+- The watchdog's tree walk follows live parent→child edges. A child that *daemonizes* (double-fork, reparented to init/launchd) leaves the tree and escapes the cap — as does any process spawned after its parent chain broke. The Windows Job Object backend does not have this gap.
+- On Windows, `Get-CimInstance` per poll makes the watchdog heavier than a plain RSS read; keep `--interval` at 0.2s or above there.
 
 ## Contributing
 
