@@ -1,6 +1,6 @@
 {
   "name": "caproom",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Memory-cap any command (AI coding agents, builds, background jobs) on macOS, Linux, and Windows — real enforcement via Docker cgroups, Windows Job Objects, or a polling watchdog, plus park/wake to reclaim idle process memory without killing.",
   "bin": {
     "caproom": "bin/caproom.js",
@@ -10,7 +10,8 @@
     "bin/caproom",
     "bin/caproom.js",
     "bin/caproom.ps1",
-    "bin/caproom-mcp.js"
+    "bin/caproom-mcp.js",
+    "scripts/postinstall.js"
   ],
   "keywords": [
     "memory",
@@ -29,7 +30,7 @@
     "win32"
   ],
   "scripts": {
-    "postinstall": "node -e \"process.stdout.write('caproom: optional next step — run `caproom setup` to bind headroom management to your shells (never modifies rc files on install)\\n')\""
+    "postinstall": "node scripts/postinstall.js"
   },
   "license": "MIT",
   "repository": {
