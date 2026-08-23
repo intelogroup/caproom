@@ -212,17 +212,52 @@ run_docker() {
     -v "$PWD:/work" -w /work "$IMAGE" "$@"
 }
 
+sum_tree_rss_kb() {
+  # Sum RSS across the whole descendant tree of $1. Agents keep their memory
+  # in children (MCP servers, bundler daemons, headless browsers) while the
+  # parent's own RSS stays flat — a top-pid-only check never fires on them.
+  # One ps snapshot per poll; BFS over pid->ppid edges. Plain indexed arrays
+  # only (no declare -A) so macOS's stock bash 3.2 works.
+  local root="$1"
+  local -a pids=() ppids=() kb=() queue=()
+  local pid ppid k total=0 cur i j
+  while read -r pid ppid k; do
+    [[ -n "$pid" ]] || continue
+    pids+=("$pid"); ppids+=("$ppid"); kb+=("$k")
+  done < <(ps -eo pid=,ppid=,rss=)
+
+  queue=("$root")
+  while [[ ${#queue[@]} -gt 0 ]]; do
+    cur="${queue[0]}"
+    if [[ ${#queue[@]} -gt 1 ]]; then queue=("${queue[@]:1}"); else queue=(); fi
+    for ((i = 0; i < ${#pids[@]}; i++)); do
+      if [[ "${pids[$i]}" == "$cur" && -n "${kb[$i]}" ]]; then
+        total=$(( total + kb[$i] ))
+        kb[$i]=""
+        for ((j = 0; j < ${#ppids[@]}; j++)); do
+          if [[ "${ppids[$j]}" == "$cur" ]]; then
+            queue+=("${pids[$j]}")
+            ppids[$j]=""
+          fi
+        done
+        break
+      fi
+    done
+  done
+  echo "$total"
+}
+
 run_watchdog() {
-  echo "caproom: watchdog backend (docker unavailable), limit=${LIMIT_MB}m poll=${INTERVAL}s" >&2
+  echo "caproom: watchdog backend (docker unavailable), limit=${LIMIT_MB}m poll=${INTERVAL}s (process-tree RSS)" >&2
   local limit_kb=$(( LIMIT_MB * 1024 ))
   "$@" &
   local pid=$!
   local exit_code=0
   while kill -0 "$pid" 2>/dev/null; do
-    local rss_kb
-    rss_kb=$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ')
-    if [[ -n "$rss_kb" && "$rss_kb" -gt "$limit_kb" ]]; then
-      echo "caproom: pid $pid RSS ${rss_kb}KB exceeded ${limit_kb}KB cap — sending SIGTERM (grace ${GRACE}s)" >&2
+    local tree_kb
+    tree_kb=$(sum_tree_rss_kb "$pid")
+    if [[ -n "$tree_kb" && "$tree_kb" -gt "$limit_kb" ]]; then
+      echo "caproom: pid $pid tree RSS ${tree_kb}KB exceeded ${limit_kb}KB cap — sending SIGTERM (grace ${GRACE}s)" >&2
       kill -TERM "$pid" 2>/dev/null || true
       local waited=0
       while kill -0 "$pid" 2>/dev/null && [[ "$waited" -lt "$GRACE" ]]; do
