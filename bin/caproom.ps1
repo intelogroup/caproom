@@ -230,6 +230,7 @@ function Invoke-Capped {
 
     $exe = $Command[0]
     $rest = if ($Command.Length -gt 1) { ConvertTo-ArgString $Command[1..($Command.Length - 1)] } else { '' }
+    [Console]::Error.WriteLine("caproom: debug exe=[$exe] rest=[$rest] commandCount=[$($Command.Length)]")
 
     if (-not $ForceWatchdog) {
         try {
