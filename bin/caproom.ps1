@@ -219,6 +219,7 @@ function Wait-CappedProcess {
     $Proc.WaitForExit()
     $out = $Proc.StdoutTask.GetAwaiter().GetResult()
     $err = $Proc.StderrTask.GetAwaiter().GetResult()
+    [Console]::Error.WriteLine("caproom: debug outlen=[$($out.Length)] errlen=[$($err.Length)] exit=[$($Proc.ExitCode)] err=[$err]")
     if ($out) { [Console]::Out.Write($out) }
     if ($err) { [Console]::Error.Write($err) }
     return $Proc.ExitCode
