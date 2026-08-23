@@ -157,11 +157,32 @@ Set-Alias -Name $Target -Value ${Target}_capped -Force
 "@
 }
 
+# Start-Process -ArgumentList joins an array with spaces and does no quoting,
+# so an argument containing whitespace gets re-split into several arguments by
+# the callee. Build one command line with CommandLineToArgvW quoting instead.
+function ConvertTo-ArgString {
+    param([string[]]$Arguments)
+    $quoted = foreach ($a in $Arguments) {
+        if ($a -eq '') { '""' }
+        elseif ($a -notmatch '[\s"]') { $a }
+        else {
+            # Double any backslashes preceding a quote (and at end of string),
+            # then escape the quotes themselves.
+            $s = $a -replace '(\\*)"', '$1$1\"'
+            $s = $s -replace '(\\+)$', '$1$1'
+            '"' + $s + '"'
+        }
+    }
+    $quoted -join ' '
+}
+
 function Invoke-Capped {
     param([int]$LimitMb, [double]$Interval, [bool]$ForceWatchdog, [string[]]$Command)
 
     $exe = $Command[0]
-    $rest = if ($Command.Length -gt 1) { $Command[1..($Command.Length - 1)] } else { @() }
+    $rest = if ($Command.Length -gt 1) { ConvertTo-ArgString $Command[1..($Command.Length - 1)] } else { $null }
+    $startArgs = @{ FilePath = $exe; PassThru = $true; NoNewWindow = $true }
+    if ($rest) { $startArgs.ArgumentList = $rest }
 
     if (-not $ForceWatchdog) {
         try {
@@ -193,7 +214,7 @@ function Invoke-Capped {
             }
 
             [Console]::Error.WriteLine("caproom: job object backend, limit=${LimitMb}m (committed memory, kernel-enforced, includes child processes)")
-            $proc = Start-Process -FilePath $exe -ArgumentList $rest -PassThru -NoNewWindow
+            $proc = Start-Process @startArgs
             $proc.WaitForExit()
             exit $proc.ExitCode
         } catch {
@@ -203,7 +224,7 @@ function Invoke-Capped {
 
     [Console]::Error.WriteLine("caproom: watchdog backend, limit=${LimitMb}m poll=${Interval}s (hard kill on breach -- Windows has no SIGTERM equivalent)")
     $limitBytes = [uint64]$LimitMb * 1MB
-    $proc = Start-Process -FilePath $exe -ArgumentList $rest -PassThru -NoNewWindow
+    $proc = Start-Process @startArgs
     while (-not $proc.HasExited) {
         $proc.Refresh()
         if (-not $proc.HasExited -and $proc.WorkingSet64 -gt $limitBytes) {

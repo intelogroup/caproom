@@ -49,6 +49,12 @@ jobs:
           $out = caproom init claude --limit 6144 | Out-String
           if ($out -notmatch 'function claude_capped') { throw "init output wrong:`n$out" }
 
+      - name: arguments with spaces survive intact
+        shell: pwsh
+        run: |
+          $out = caproom --limit 512 -- node -e "console.log('a b'.length + ' ' + process.argv.length)" | Out-String
+          if ($out.Trim() -ne '3 1') { throw "argument mangled - expected '3 1', got '$($out.Trim())'" }
+
       - name: cap actually enforces
         shell: pwsh
         run: |
@@ -56,7 +62,7 @@ jobs:
           $log = caproom --limit 256 -- node -e $script 2>&1 | Out-String
           $code = $LASTEXITCODE
           Write-Host $log
-          if ($code -eq 0) { throw "1GB allocation under a 256MB cap exited 0 — cap did not enforce" }
+          if ($code -eq 0) { throw "1GB allocation under a 256MB cap exited 0 - cap did not enforce" }
           if ($log -notmatch 'job object backend') {
             throw "fell back to the polling watchdog - the Job Object path did not fire"
           }
@@ -74,5 +80,5 @@ jobs:
           $p.Refresh(); $after = $p.WorkingSet64
           Write-Host "working set $([math]::Round($before/1MB))MB -> $([math]::Round($after/1MB))MB"
           if ($after -ge $before) { throw "EmptyWorkingSet did not reduce the working set" }
-          if ($p.HasExited) { throw "park killed the process — it must keep running" }
+          if ($p.HasExited) { throw "park killed the process - it must keep running" }
           Stop-Process -Id $p.Id -Force
