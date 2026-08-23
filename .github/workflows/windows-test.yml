@@ -16,7 +16,6 @@ jobs:
           node-version: 22
 
       - name: Parse check
-        run: powershell -NoProfile -Command "$t=$null;$e=$null;[void][System.Management.Automation.Language.Parser]::ParseFile('bin/caproom.ps1',[ref]$t,[ref]$e); if($e.Count){$e|%{Write-Error $_.Message};exit 1}else{'PS-PARSE-OK'}"
         shell: pwsh
         run: |
           $errs = $null
