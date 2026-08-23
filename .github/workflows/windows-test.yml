@@ -59,9 +59,10 @@ jobs:
         shell: pwsh
         run: |
           $script = 'const a=[];for(;;){a.push(Buffer.alloc(10*1024*1024));}'
-          $log = caproom --limit 256 -- node -e $script 2>&1 | Out-String
+          $log = & caproom --limit 256 -- node -e $script 2>&1 | Out-String
           $code = $LASTEXITCODE
           Write-Host $log
+          Write-Host "exit code: $code"
           if ($code -eq 0) { throw "1GB allocation under a 256MB cap exited 0 - cap did not enforce" }
           if ($log -notmatch 'job object backend') {
             throw "fell back to the polling watchdog - the Job Object path did not fire"
