@@ -3,7 +3,7 @@
 [![npm](https://img.shields.io/npm/v/caproom.svg)](https://www.npmjs.com/package/caproom)
 [![license](https://img.shields.io/npm/l/caproom.svg)](LICENSE)
 
-Memory-cap any command — AI coding agents, builds, background jobs — on macOS/Linux.
+Stop AI agents, builds, and background jobs from eating all your RAM — enforced memory caps plus idle-process parking, for macOS/Linux.
 
 ## Why
 
