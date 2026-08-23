@@ -504,18 +504,22 @@ function Invoke-Watch {
     # Same NDJSON contract as the POSIX watcher (schema:1 events on stdout
     # under --json). Explicit pids only; naming the pid IS the opt-in for
     # --auto-park, same rule as POSIX.
+    # NOTE: args arrive via the named -Rest parameter, NOT $args — splatting
+    # into $args proved unreliable here (every element read back as null,
+    # yielding pids [0,0,0,0] and a busy-spinning interval-0 loop).
+    param([string[]]$Rest)
     $thresholdMb = 2048; $intervalSec = 5.0; $auto = $false; $wake = -1.0; $json = $false
     $targets = New-Object System.Collections.Generic.List[int]
-    for ($i = 0; $i -lt $args.Count; $i++) {
-        switch ($args[$i]) {
-            '--threshold-mb'        { $thresholdMb = [int]$args[$i + 1]; $i++ }
-            '--interval'            { $intervalSec = [double]$args[$i + 1]; $i++ }
+    for ($i = 0; $i -lt $Rest.Count; $i++) {
+        switch ($Rest[$i]) {
+            '--threshold-mb'        { $thresholdMb = [int]$Rest[$i + 1]; $i++ }
+            '--interval'            { $intervalSec = [double]$Rest[$i + 1]; $i++ }
             '--auto-park'           { $auto = $true }
-            '--auto-wake-free-pct'  { $wake = [double]$args[$i + 1]; $i++ }
+            '--auto-wake-free-pct'  { $wake = [double]$Rest[$i + 1]; $i++ }
             '--json'                { $json = $true }
             default {
-                try { $targets.Add([int]$args[$i]) }
-                catch { [Console]::Error.WriteLine("caproom: unknown watch arg $($args[$i])"); exit 1 }
+                try { $targets.Add([int]$Rest[$i]) }
+                catch { [Console]::Error.WriteLine("caproom: unknown watch arg $($Rest[$i])"); exit 1 }
             }
         }
     }
@@ -523,6 +527,7 @@ function Invoke-Watch {
         [Console]::Error.WriteLine('usage: caproom watch [--threshold-mb <mb>] [--interval <sec>] [--auto-park] [--auto-wake-free-pct <pct>] [--json] <pid...>')
         exit 1
     }
+    if ($intervalSec -lt 0.5) { $intervalSec = 0.5 }
 
     function Emit([object]$Ev) {
         [Console]::Out.WriteLine((ConvertTo-Json -Compress -Depth 6 -InputObject $Ev))
@@ -683,7 +688,7 @@ switch ($args[0]) {
         exit 0
     }
     'watch' {
-        Invoke-Watch @($args | Select-Object -Skip 1)
+        Invoke-Watch -Rest @($args | Select-Object -Skip 1)
         exit 0
     }
     'park'   {
