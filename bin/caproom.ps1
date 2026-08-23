@@ -112,17 +112,6 @@ public static class Caproom {
     public const int ExtendedLimitInformation = 9;
     public const uint LIMIT_PROCESS_MEMORY = 0x00000100;
     public const uint LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    public static extern bool SetHandleInformation(IntPtr hObject, uint dwMask, uint dwFlags);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    public static extern IntPtr GetStdHandle(int nStdHandle);
-
-    public const int STD_INPUT_HANDLE = -10;
-    public const int STD_OUTPUT_HANDLE = -11;
-    public const int STD_ERROR_HANDLE = -12;
-    public const uint HANDLE_FLAG_INHERIT = 1;
 }
 '@
 
@@ -232,81 +221,39 @@ function ConvertTo-ArgString {
 }
 
 function New-CappedProcess {
-    # Both Start-Process -NoNewWindow (console-handle inheritance) and a bare
-    # System.Diagnostics.Process with UseShellExecute=$false (no redirection
-    # at all) silently lost the child's stdout in CI: caproom is invoked as
-    # powershell.exe -File caproom.ps1 from the Node shim, itself invoked
-    # from a pwsh.EXE step that captures via a pipe (`| Out-String`) -- that
-    # nesting breaks console-handle inheritance. A Register-ObjectEvent relay
-    # was tried next and also failed: its callbacks only run when the
-    # PowerShell engine's event queue is pumped, but WaitForExit() blocks the
-    # single script thread, and this function's caller calls `exit`
-    # immediately after -- the queued output events never got a chance to
-    # fire before the process ended. ReadToEndAsync() sidesteps the engine's
-    # event queue entirely: the reads run on the .NET thread pool, are
-    # started before the blocking wait (so nothing can deadlock on a full
-    # pipe buffer), and by the time WaitForExit() returns the .Result is
-    # already available synchronously.
+    # Every pipe-based capture (Process class + ReadToEndAsync, Process class
+    # + raw BaseStream, with and without stripping std-handle inheritance)
+    # returned zero bytes in CI despite a clean exit 0 -- caproom is invoked
+    # as powershell.exe -File caproom.ps1 from the Node shim, itself invoked
+    # from a pwsh.EXE step that captures via a pipe (`| Out-String`), and
+    # something in that nesting swallows anonymous-pipe output every time.
+    # File-based redirection (Start-Process -RedirectStandardOutput <file>)
+    # was the one capture method that survived an isolated repro under the
+    # exact same nesting in the same CI job, so route through temp files
+    # instead of pipes entirely.
     param([string]$Exe, [string]$Args)
     $resolvedExe = $Exe
     $cmd = Get-Command $Exe -ErrorAction SilentlyContinue
     if ($cmd) { $resolvedExe = $cmd.Source }
 
-    # caproom.ps1 is itself a grandchild whose own stdout/stderr are an
-    # inherited pipe (Node's spawnSync stdio:'inherit', itself inherited from
-    # an outer `| Out-String` pipeline). Process.Start() always passes
-    # bInheritHandles=TRUE when any stream is redirected, so those inherited
-    # pipe handles get duplicated into every child we spawn alongside the
-    # fresh pipes .NET creates for capture -- the child can end up writing
-    # into the leaked duplicate instead, which reads back as a clean exit
-    # with zero captured bytes. Strip inheritability from our own std
-    # handles right before spawning so only the intended pipes propagate.
-    Import-Native
-    foreach ($h in @([Caproom]::STD_INPUT_HANDLE, [Caproom]::STD_OUTPUT_HANDLE, [Caproom]::STD_ERROR_HANDLE)) {
-        $handle = [Caproom]::GetStdHandle($h)
-        if ($handle -ne [IntPtr]::Zero -and $handle -ne [IntPtr]::new(-1)) {
-            [void][Caproom]::SetHandleInformation($handle, [Caproom]::HANDLE_FLAG_INHERIT, 0)
-        }
-    }
+    $outFile = [IO.Path]::GetTempFileName()
+    $errFile = [IO.Path]::GetTempFileName()
+    $proc = Start-Process -FilePath $resolvedExe -ArgumentList $Args -NoNewWindow `
+        -RedirectStandardOutput $outFile -RedirectStandardError $errFile -PassThru
 
-    $psi = New-Object Diagnostics.ProcessStartInfo
-    $psi.FileName = $resolvedExe
-    $psi.Arguments = $Args
-    $psi.UseShellExecute = $false
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-
-    $proc = New-Object Diagnostics.Process
-    $proc.StartInfo = $psi
-    [void]$proc.Start()
-    [Console]::Error.WriteLine("caproom: debug started pid=$($proc.Id) canReadOut=$($proc.StandardOutput.BaseStream.CanRead) canReadErr=$($proc.StandardError.BaseStream.CanRead)")
-
-    # ReadToEndAsync() returned empty for every child in CI (even `node -v`,
-    # exit 0, no quoting) across two separate backends -- read the raw
-    # BaseStream synchronously instead, to tell apart "StreamReader bug" from
-    # "pipe never had any bytes in it".
-    $proc | Add-Member -NotePropertyName StdoutStream -NotePropertyValue $proc.StandardOutput.BaseStream
-    $proc | Add-Member -NotePropertyName StderrStream -NotePropertyValue $proc.StandardError.BaseStream
+    $proc | Add-Member -NotePropertyName StdoutFile -NotePropertyValue $outFile
+    $proc | Add-Member -NotePropertyName StderrFile -NotePropertyValue $errFile
     return $proc
 }
 
 function Wait-CappedProcess {
     # Call once the caller is done polling / ready to block. Relays whatever
-    # the child wrote verbatim (no line-splitting, no encoding reinterpret
-    # beyond .NET's default stream decoding) and returns the exit code.
+    # the child wrote verbatim and returns the exit code.
     param($Proc)
-    # ponytail: sequential CopyTo (stdout fully drained before stderr) can
-    # deadlock a child that fills the stderr pipe buffer while blocked
-    # writing stdout -- diagnostic only, revert to concurrent async reads
-    # once the empty-capture bug is confirmed dead.
-    $outMs = New-Object IO.MemoryStream
-    $errMs = New-Object IO.MemoryStream
-    $Proc.StdoutStream.CopyTo($outMs)
-    $Proc.StderrStream.CopyTo($errMs)
     $Proc.WaitForExit()
-    $out = [Text.Encoding]::UTF8.GetString($outMs.ToArray())
-    $err = [Text.Encoding]::UTF8.GetString($errMs.ToArray())
-    [Console]::Error.WriteLine("caproom: debug outlen=[$($out.Length)] errlen=[$($err.Length)] exit=[$($Proc.ExitCode)] err=[$err]")
+    $out = Get-Content -Raw -Path $Proc.StdoutFile -ErrorAction SilentlyContinue
+    $err = Get-Content -Raw -Path $Proc.StderrFile -ErrorAction SilentlyContinue
+    Remove-Item -Path $Proc.StdoutFile, $Proc.StderrFile -ErrorAction SilentlyContinue
     if ($out) { [Console]::Out.Write($out) }
     if ($err) { [Console]::Error.Write($err) }
     return $Proc.ExitCode
