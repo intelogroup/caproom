@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.0 — 2026-08-23
+
+### Added
+- **Windows `top --json` and `watch` parity** for the PowerShell backend — the full agent interface (`caproom-mcp`) now works on win32. Same schema-1 envelope and NDJSON event contract as POSIX; whole-tree auto-park via ntdll `NtSuspendProcess`, auto-wake via `NtResumeProcess`. Honest divergence: win32 exposes no cheap sleep-state, so `state` is always `"running"` and the park reason says no sleep check was made.
+- Windows CI now parse-checks the PowerShell backend (fails fast with line numbers) and exercises `top --json` plus a live watcher's started event.
+
 ## 0.6.0 — 2026-08-23
 
 ### Added
