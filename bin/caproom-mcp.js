@@ -131,11 +131,14 @@ function callTool(name, args) {
       if (args.docker) { a.push('--docker'); if (args.image) a.push('--image', String(args.image)); }
       a.push('--');
       const r = caproom(a.concat(cmd), { timeout: Math.max(60000, (args.timeout_ms || 300000)) });
-      let verdict = '';
+      const errText = (r.stderr || '');
+      const capped = /exceeded .* cap/.test(errText);
+      let verdict;
       if (r.status === 137 || r.signal === 'SIGKILL') verdict = 'RESULT: KILLED BY CAP (exit 137)';
+      else if (capped && (r.status === 143 || r.signal === 'SIGTERM')) verdict = 'RESULT: CAPPED — tree killed during grace (SIGTERM honored, exit 143)';
       else if (r.status === 143 || r.signal === 'SIGTERM') verdict = 'RESULT: terminated during grace (SIGTERM honored)';
       else verdict = 'RESULT: exit=' + r.status;
-      return text(verdict + '\n--- stderr ---\n' + ((r.stderr || '').slice(-4000) || '(empty)'));
+      return text(verdict + '\n--- stderr ---\n' + (errText.slice(-4000) || '(empty)'));
     }
     default:
       throw new Error('unknown tool: ' + name);
