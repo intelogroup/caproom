@@ -52,6 +52,25 @@ Env var overrides: `CAPROOM_LIMIT_MB`, `CAPROOM_IMAGE`, `CAPROOM_INTERVAL`, `CAP
 
 On cap breach, the watchdog backend sends `SIGTERM` first and waits `--grace` seconds (default 5) before `SIGKILL` — gives a process a chance to flush/save state (useful for long-running agents, not just disposable scripts). If the process exits cleanly during the grace window, `caproom` propagates its real exit code; only a hard `SIGKILL` (process ignored `SIGTERM` or grace ran out) reports `137` (same convention as Docker's own OOM-kill exit code, which the docker backend always uses on breach since Docker itself sends the kill).
 
+## park / wake — reclaim idle memory without killing
+
+Long-running agent sessions accumulate subprocesses that go idle but stay resident — old file watchers, finished tool-call children, stale servers. Killing them loses state; leaving them wastes RAM. `caproom park` freezes instead:
+
+```bash
+caproom park <pid>    # SIGSTOP — process stays alive, keeps its PID and state,
+                       # just isn't scheduled. Its memory becomes eligible for
+                       # the kernel's own compressor once real system memory
+                       # pressure shows up.
+caproom wake <pid>     # SIGCONT — resumes instantly, same state, no restart.
+caproom status <pid>   # pid, state (T = parked, S = running), RSS, elapsed
+```
+
+Verified empirically on macOS: a parked process's RSS dropped ~90% (345MB → 37MB) once real memory pressure hit, and resumed correctly and stayed responsive after `SIGCONT`. No reclaim happens while the system is idle/unpressured — this rides the kernel's own compressor, it doesn't force anything.
+
+No daemon, no tracking file, no dependency — just `SIGSTOP`/`SIGCONT` wrapped with a friendly CLI. Any script or agent can call `caproom park <pid>` / `caproom wake <pid>` directly.
+
+**Caveat**: a parked process does zero work while stopped — no CPU, no I/O, no timers firing. Only park something you know is actually idle (a background watcher, a finished subprocess kept around for reuse) — never park the process an agent is actively waiting on a response from, or you'll hang the agent, not save it memory.
+
 ## Limitations
 
 - Docker backend mounts `$PWD` into the container at `/work` and runs there — paths outside `$PWD` aren't visible to the command.

@@ -12,6 +12,9 @@ set -euo pipefail
 usage() {
   cat >&2 << 'EOF'
 usage: caproom [--limit <mb>] [--image <docker-image>] [--interval <sec>] -- <command> [args...]
+       caproom park <pid>
+       caproom wake <pid>
+       caproom status <pid>
 
   --limit <mb>     memory cap in MB (default: 4096)
   --image <name>   docker image to run the command in, when using the docker
@@ -23,14 +26,53 @@ usage: caproom [--limit <mb>] [--image <docker-image>] [--interval <sec>] -- <co
                     to flush/save state before a hard kill
   --force-watchdog force the polling watchdog even if Docker is available
 
+park / wake — freeze an idle process so the kernel can reclaim/compress its
+memory without killing it. For a long-running agent sitting on stale
+subprocesses: `caproom park <pid>` (SIGSTOP) instead of killing it. It stays
+alive, keeps its PID, keeps its state — just isn't scheduled and its memory
+becomes eligible for compression under system memory pressure. `caproom wake
+<pid>` (SIGCONT) brings it back instantly, same state, no restart needed.
+Any agent can call these directly — they're just SIGSTOP/SIGCONT, no daemon,
+no tracking file required.
+
 env vars (override flags): CAPROOM_LIMIT_MB, CAPROOM_IMAGE, CAPROOM_INTERVAL, CAPROOM_GRACE
 
 examples:
   caproom --limit 2048 -- npm run build
   caproom --limit 512 -- claude --dangerously-skip-permissions -p "task"
+  caproom park 12345
+  caproom wake 12345
 EOF
   exit 1
 }
+
+cmd_park() {
+  local pid="${1:-}"
+  [[ -z "$pid" ]] && { echo "usage: caproom park <pid>" >&2; exit 1; }
+  kill -0 "$pid" 2>/dev/null || { echo "caproom: no such pid $pid" >&2; exit 1; }
+  kill -STOP "$pid"
+  echo "caproom: pid $pid parked (SIGSTOP) — memory now eligible for kernel reclaim under pressure. wake with: caproom wake $pid" >&2
+}
+
+cmd_wake() {
+  local pid="${1:-}"
+  [[ -z "$pid" ]] && { echo "usage: caproom wake <pid>" >&2; exit 1; }
+  kill -0 "$pid" 2>/dev/null || { echo "caproom: no such pid $pid" >&2; exit 1; }
+  kill -CONT "$pid"
+  echo "caproom: pid $pid woken (SIGCONT)" >&2
+}
+
+cmd_status() {
+  local pid="${1:-}"
+  [[ -z "$pid" ]] && { echo "usage: caproom status <pid>" >&2; exit 1; }
+  ps -o pid,stat,rss,etime,command -p "$pid" 2>/dev/null || { echo "caproom: no such pid $pid" >&2; exit 1; }
+}
+
+case "${1:-}" in
+  park) shift; cmd_park "$@"; exit 0 ;;
+  wake) shift; cmd_wake "$@"; exit 0 ;;
+  status) shift; cmd_status "$@"; exit 0 ;;
+esac
 
 LIMIT_MB="${CAPROOM_LIMIT_MB:-4096}"
 IMAGE="${CAPROOM_IMAGE:-node:22-slim}"
