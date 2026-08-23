@@ -202,9 +202,15 @@ jobs:
       - name: watch observer emits started event (NDJSON on stdout)
         shell: powershell
         run: |
-          $p = Start-Process powershell -ArgumentList '-NoProfile','-Command','Start-Sleep 20' -PassThru -WindowStyle Hidden
+          $p = Start-Process powershell -ArgumentList '-NoProfile','-Command','Start-Sleep 5' -PassThru -WindowStyle Hidden
           Start-Sleep -Milliseconds 500
-          $out = & caproom watch --json --threshold-mb 1000000 --interval 1 -- $p.Id 2>$null
+          $job = Start-Job -ArgumentList $p.Id -ScriptBlock {
+            param($targetPid)
+            & caproom watch --json --threshold-mb 1000000 --interval 1 -- $targetPid 2>$null
+          }
+          if (Wait-Job $job -Timeout 30) { $out = Receive-Job $job }
+          else { Stop-Job $job; throw "watcher did not exit within 30s" }
+          Remove-Job $job -Force -ErrorAction SilentlyContinue
           Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
           $ev = ($out | Select-Object -First 1) | ConvertFrom-Json
           if ($ev.event -ne 'started') { throw "first event: $($ev.event)" }
