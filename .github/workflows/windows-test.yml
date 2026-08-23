@@ -55,6 +55,13 @@ jobs:
           $out = caproom --limit 512 -- node -e "console.log('a b'.length + ' ' + process.argv.length)" | Out-String
           if ($out.Trim() -ne '3 1') { throw "argument mangled - expected '3 1', got '$($out.Trim())'" }
 
+      - name: exit code propagates through the shim (isolation check)
+        shell: pwsh
+        run: |
+          & caproom --limit 512 -- node -e "process.exit(3)"
+          Write-Host "propagated exit code: $LASTEXITCODE"
+          if ($LASTEXITCODE -ne 3) { throw "expected 3, got $LASTEXITCODE" }
+
       - name: cap actually enforces
         shell: pwsh
         run: |
