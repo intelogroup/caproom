@@ -286,21 +286,10 @@
       "norm_label": "convertto-argstring()"
     },
     {
-      "label": "Start-CappedProcess()",
-      "file_type": "code",
-      "source_file": "bin/caproom.ps1",
-      "source_location": "L179",
-      "_origin": "ast",
-      "id": "bin_caproom_start_cappedprocess",
-      "community": 4,
-      "community_name": "caproom.ps1",
-      "norm_label": "start-cappedprocess()"
-    },
-    {
       "label": "Invoke-Capped()",
       "file_type": "code",
       "source_file": "bin/caproom.ps1",
-      "source_location": "L190",
+      "source_location": "L179",
       "_origin": "ast",
       "id": "bin_caproom_invoke_capped",
       "community": 4,
@@ -380,8 +369,8 @@
       "source_location": "L8",
       "_origin": "ast",
       "id": "package_files",
-      "community": 0,
-      "community_name": "package.json",
+      "community": 6,
+      "community_name": "files",
       "norm_label": "files"
     },
     {
@@ -391,8 +380,8 @@
       "source_location": "L8",
       "_origin": "ast",
       "id": "ref_bin_caproom",
-      "community": 0,
-      "community_name": "package.json",
+      "community": 6,
+      "community_name": "files",
       "norm_label": "bin/caproom"
     },
     {
@@ -402,8 +391,8 @@
       "source_location": "L8",
       "_origin": "ast",
       "id": "ref_bin_caproom_js",
-      "community": 0,
-      "community_name": "package.json",
+      "community": 6,
+      "community_name": "files",
       "norm_label": "bin/caproom.js"
     },
     {
@@ -413,8 +402,8 @@
       "source_location": "L8",
       "_origin": "ast",
       "id": "ref_bin_caproom_ps1",
-      "community": 0,
-      "community_name": "package.json",
+      "community": 6,
+      "community_name": "files",
       "norm_label": "bin/caproom.ps1"
     },
     {
@@ -534,8 +523,8 @@
       "source_location": "L24",
       "_origin": "ast",
       "id": "package_os",
-      "community": 6,
-      "community_name": "os",
+      "community": 0,
+      "community_name": "package.json",
       "norm_label": "os"
     },
     {
@@ -545,8 +534,8 @@
       "source_location": "L24",
       "_origin": "ast",
       "id": "ref_darwin",
-      "community": 6,
-      "community_name": "os",
+      "community": 0,
+      "community_name": "package.json",
       "norm_label": "darwin"
     },
     {
@@ -556,8 +545,8 @@
       "source_location": "L24",
       "_origin": "ast",
       "id": "ref_linux",
-      "community": 6,
-      "community_name": "os",
+      "community": 0,
+      "community_name": "package.json",
       "norm_label": "linux"
     },
     {
@@ -567,8 +556,8 @@
       "source_location": "L24",
       "_origin": "ast",
       "id": "ref_win32",
-      "community": 6,
-      "community_name": "os",
+      "community": 0,
+      "community_name": "package.json",
       "norm_label": "win32"
     },
     {
@@ -1047,7 +1036,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "bin/caproom.ps1",
-      "source_location": "L190",
+      "source_location": "L179",
       "weight": 1.0,
       "_origin": "ast",
       "source": "bin_caproom_ps1_bin_caproom",
@@ -1110,32 +1099,10 @@
       "confidence_score": 1.0
     },
     {
-      "relation": "contains",
-      "confidence": "EXTRACTED",
-      "source_file": "bin/caproom.ps1",
-      "source_location": "L179",
-      "weight": 1.0,
-      "_origin": "ast",
-      "source": "bin_caproom_ps1_bin_caproom",
-      "target": "bin_caproom_start_cappedprocess",
-      "confidence_score": 1.0
-    },
-    {
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "bin/caproom.ps1",
-      "source_location": "L259",
-      "weight": 1.0,
-      "_origin": "ast",
-      "source": "bin_caproom_start_cappedprocess",
-      "target": "bin_caproom_show_usage",
-      "confidence_score": 1.0
-    },
-    {
-      "relation": "calls",
-      "confidence": "EXTRACTED",
-      "source_file": "bin/caproom.ps1",
-      "source_location": "L205",
+      "source_location": "L189",
       "weight": 1.0,
       "_origin": "ast",
       "source": "bin_caproom_invoke_capped",
@@ -1157,66 +1124,11 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "bin/caproom.ps1",
-      "source_location": "L267",
-      "weight": 1.0,
-      "_origin": "ast",
-      "source": "bin_caproom_start_cappedprocess",
-      "target": "bin_caproom_invoke_park",
-      "confidence_score": 1.0
-    },
-    {
-      "relation": "calls",
-      "confidence": "EXTRACTED",
-      "source_file": "bin/caproom.ps1",
-      "source_location": "L271",
-      "weight": 1.0,
-      "_origin": "ast",
-      "source": "bin_caproom_start_cappedprocess",
-      "target": "bin_caproom_invoke_wake",
-      "confidence_score": 1.0
-    },
-    {
-      "relation": "calls",
-      "confidence": "EXTRACTED",
-      "source_file": "bin/caproom.ps1",
-      "source_location": "L275",
-      "weight": 1.0,
-      "_origin": "ast",
-      "source": "bin_caproom_start_cappedprocess",
-      "target": "bin_caproom_invoke_status",
-      "confidence_score": 1.0
-    },
-    {
-      "relation": "calls",
-      "confidence": "EXTRACTED",
-      "source_file": "bin/caproom.ps1",
-      "source_location": "L285",
-      "weight": 1.0,
-      "_origin": "ast",
-      "source": "bin_caproom_start_cappedprocess",
-      "target": "bin_caproom_invoke_init",
-      "confidence_score": 1.0
-    },
-    {
-      "relation": "calls",
-      "confidence": "EXTRACTED",
-      "source_file": "bin/caproom.ps1",
-      "source_location": "L194",
+      "source_location": "L183",
       "weight": 1.0,
       "_origin": "ast",
       "source": "bin_caproom_invoke_capped",
       "target": "bin_caproom_convertto_argstring",
-      "confidence_score": 1.0
-    },
-    {
-      "relation": "calls",
-      "confidence": "EXTRACTED",
-      "source_file": "bin/caproom.ps1",
-      "source_location": "L308",
-      "weight": 1.0,
-      "_origin": "ast",
-      "source": "bin_caproom_start_cappedprocess",
-      "target": "bin_caproom_invoke_capped",
       "confidence_score": 1.0
     },
     {
@@ -1687,5 +1599,5 @@
     }
   ],
   "hyperedges": [],
-  "built_at_commit": "5ca76d01e1e225041f253ec864c2af323f05b4cf"
+  "built_at_commit": "20b2e9ef7ba6279662ae1f353b43984646d4715b"
 }

@@ -10,13 +10,13 @@
     "semantic_hash": ""
   },
   "bin/caproom.js": {
-    "mtime": 1787503229.814054,
+    "mtime": 1787502241.4091055,
     "ast_hash": "9c1b2957b010ca341e7bffe5ca9b7e53",
     "semantic_hash": ""
   },
   "bin/caproom.ps1": {
-    "mtime": 1787503545.807948,
-    "ast_hash": "10c52bba95c7afc8295005eadbeae441",
+    "mtime": 1787502853.537653,
+    "ast_hash": "3d06796eac56a7f398c879b3c32a61a0",
     "semantic_hash": ""
   },
   "package.json": {
@@ -30,8 +30,8 @@
     "semantic_hash": ""
   },
   ".github/workflows/windows-test.yml": {
-    "mtime": 1787503235.2207258,
-    "ast_hash": "cb32053297fe5d8f3034dc2642590809",
+    "mtime": 1787502778.7903688,
+    "ast_hash": "7cf3fa347bf5f35cce550e7f072eb7ba",
     "semantic_hash": ""
   },
   "README.md": {

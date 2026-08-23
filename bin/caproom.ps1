@@ -176,15 +176,16 @@ function ConvertTo-ArgString {
     $quoted -join ' '
 }
 
-function New-CappedProcess {
+function Start-CappedProcess {
     param([string]$Exe, [string]$Args)
-    $psi = New-Object Diagnostics.ProcessStartInfo
-    $psi.FileName = $Exe
-    $psi.Arguments = $Args
-    $psi.UseShellExecute = $false
-    $proc = [Diagnostics.Process]::Start($psi)
-    return $proc
-}
+    $spArgs = @{ FilePath = $Exe; PassThru = $true; NoNewWindow = $true; Wait = $true }
+    if ($Args) { $spArgs.ArgumentList = $Args }
+    # -Wait alongside -PassThru, not a manual WaitForExit() afterwards: the
+    # ExitCode on a -PassThru object read null even after WaitForExit()
+    # returned true for HasExited (confirmed via CI trace on windows-latest).
+    # -Wait blocks Start-Process itself until the process and its exit code
+    # are fully synced, which is the documented-reliable combination.
+    return Start-Process @spArgs
 
 function Invoke-Capped {
     param([int]$LimitMb, [double]$Interval, [bool]$ForceWatchdog, [string[]]$Command)
