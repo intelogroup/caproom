@@ -241,20 +241,20 @@ function New-CappedProcess {
     $psi.FileName = $Exe
     $psi.Arguments = $Args
     $psi.UseShellExecute = $false
-    $psi.CreateNoWindow = $true
-    $psi.RedirectStandardInput = $true
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
 
     $proc = New-Object Diagnostics.Process
     $proc.StartInfo = $psi
     [void]$proc.Start()
-    $proc.StandardInput.Close()
+    [Console]::Error.WriteLine("caproom: debug started pid=$($proc.Id) canReadOut=$($proc.StandardOutput.BaseStream.CanRead) canReadErr=$($proc.StandardError.BaseStream.CanRead)")
 
-    $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
-    $stderrTask = $proc.StandardError.ReadToEndAsync()
-    $proc | Add-Member -NotePropertyName StdoutTask -NotePropertyValue $stdoutTask
-    $proc | Add-Member -NotePropertyName StderrTask -NotePropertyValue $stderrTask
+    # ReadToEndAsync() returned empty for every child in CI (even `node -v`,
+    # exit 0, no quoting) across two separate backends -- read the raw
+    # BaseStream synchronously instead, to tell apart "StreamReader bug" from
+    # "pipe never had any bytes in it".
+    $proc | Add-Member -NotePropertyName StdoutStream -NotePropertyValue $proc.StandardOutput.BaseStream
+    $proc | Add-Member -NotePropertyName StderrStream -NotePropertyValue $proc.StandardError.BaseStream
     return $proc
 }
 
@@ -263,9 +263,17 @@ function Wait-CappedProcess {
     # the child wrote verbatim (no line-splitting, no encoding reinterpret
     # beyond .NET's default stream decoding) and returns the exit code.
     param($Proc)
+    # ponytail: sequential CopyTo (stdout fully drained before stderr) can
+    # deadlock a child that fills the stderr pipe buffer while blocked
+    # writing stdout -- diagnostic only, revert to concurrent async reads
+    # once the empty-capture bug is confirmed dead.
+    $outMs = New-Object IO.MemoryStream
+    $errMs = New-Object IO.MemoryStream
+    $Proc.StdoutStream.CopyTo($outMs)
+    $Proc.StderrStream.CopyTo($errMs)
     $Proc.WaitForExit()
-    $out = $Proc.StdoutTask.GetAwaiter().GetResult()
-    $err = $Proc.StderrTask.GetAwaiter().GetResult()
+    $out = [Text.Encoding]::UTF8.GetString($outMs.ToArray())
+    $err = [Text.Encoding]::UTF8.GetString($errMs.ToArray())
     [Console]::Error.WriteLine("caproom: debug outlen=[$($out.Length)] errlen=[$($err.Length)] exit=[$($Proc.ExitCode)] err=[$err]")
     if ($out) { [Console]::Out.Write($out) }
     if ($err) { [Console]::Error.Write($err) }
