@@ -32,11 +32,16 @@ jobs:
           caproom --help | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "help exit $LASTEXITCODE" }
 
+      # These steps assert a NON-zero exit from caproom. GitHub's pwsh shell
+      # appends `exit $LASTEXITCODE`, so each must end with an explicit exit 0
+      # or the step fails on the very exit code it is verifying.
       - name: no args exits 1
         shell: pwsh
         run: |
           caproom 2>$null | Out-Null
-          if ($LASTEXITCODE -ne 1) { throw "expected exit 1, got $LASTEXITCODE" }
+          $code = $LASTEXITCODE
+          if ($code -ne 1) { throw "expected exit 1, got $code" }
+          exit 0
 
       - name: init emits a function
         shell: pwsh
@@ -53,8 +58,9 @@ jobs:
           Write-Host $log
           if ($code -eq 0) { throw "1GB allocation under a 256MB cap exited 0 — cap did not enforce" }
           if ($log -notmatch 'job object backend') {
-            throw "fell back to the polling watchdog — the Job Object path did not fire"
+            throw "fell back to the polling watchdog - the Job Object path did not fire"
           }
+          exit 0
 
       - name: park trims the working set
         shell: pwsh
