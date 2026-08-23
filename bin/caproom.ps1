@@ -241,12 +241,15 @@ function New-CappedProcess {
     $psi.FileName = $Exe
     $psi.Arguments = $Args
     $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardInput = $true
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
 
     $proc = New-Object Diagnostics.Process
     $proc.StartInfo = $psi
     [void]$proc.Start()
+    $proc.StandardInput.Close()
 
     $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
     $stderrTask = $proc.StandardError.ReadToEndAsync()
