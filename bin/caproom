@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# aicap — memory-cap any command (AI coding agents, builds, background jobs)
+# caproom — memory-cap any command (AI coding agents, builds, background jobs)
 # on macOS/Linux. macOS has no working RLIMIT_AS/DATA/RSS or launchd RSS
 # enforcement (verified empirically — both are no-ops on modern macOS), so
 # this uses whichever real enforcement mechanism is available:
@@ -11,7 +11,7 @@ set -euo pipefail
 
 usage() {
   cat >&2 << 'EOF'
-usage: aicap [--limit <mb>] [--image <docker-image>] [--interval <sec>] -- <command> [args...]
+usage: caproom [--limit <mb>] [--image <docker-image>] [--interval <sec>] -- <command> [args...]
 
   --limit <mb>     memory cap in MB (default: 4096)
   --image <name>   docker image to run the command in, when using the docker
@@ -20,18 +20,18 @@ usage: aicap [--limit <mb>] [--image <docker-image>] [--interval <sec>] -- <comm
                     (default: 0.2)
   --force-watchdog force the polling watchdog even if Docker is available
 
-env vars (override flags): AICAP_LIMIT_MB, AICAP_IMAGE, AICAP_INTERVAL
+env vars (override flags): CAPROOM_LIMIT_MB, CAPROOM_IMAGE, CAPROOM_INTERVAL
 
 examples:
-  aicap --limit 2048 -- npm run build
-  aicap --limit 512 -- claude --dangerously-skip-permissions -p "task"
+  caproom --limit 2048 -- npm run build
+  caproom --limit 512 -- claude --dangerously-skip-permissions -p "task"
 EOF
   exit 1
 }
 
-LIMIT_MB="${AICAP_LIMIT_MB:-4096}"
-IMAGE="${AICAP_IMAGE:-node:22-slim}"
-INTERVAL="${AICAP_INTERVAL:-0.2}"
+LIMIT_MB="${CAPROOM_LIMIT_MB:-4096}"
+IMAGE="${CAPROOM_IMAGE:-node:22-slim}"
+INTERVAL="${CAPROOM_INTERVAL:-0.2}"
 FORCE_WATCHDOG=0
 
 while [[ $# -gt 0 ]]; do
@@ -53,14 +53,14 @@ docker_available() {
 }
 
 run_docker() {
-  echo "aicap: docker cgroup backend, limit=${LIMIT_MB}m image=${IMAGE}" >&2
+  echo "caproom: docker cgroup backend, limit=${LIMIT_MB}m image=${IMAGE}" >&2
   exec docker run --rm -i \
     --memory="${LIMIT_MB}m" --memory-swap="${LIMIT_MB}m" \
     -v "$PWD:/work" -w /work "$IMAGE" "$@"
 }
 
 run_watchdog() {
-  echo "aicap: watchdog backend (docker unavailable), limit=${LIMIT_MB}m poll=${INTERVAL}s" >&2
+  echo "caproom: watchdog backend (docker unavailable), limit=${LIMIT_MB}m poll=${INTERVAL}s" >&2
   local limit_kb=$(( LIMIT_MB * 1024 ))
   "$@" &
   local pid=$!
@@ -69,7 +69,7 @@ run_watchdog() {
     local rss_kb
     rss_kb=$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ')
     if [[ -n "$rss_kb" && "$rss_kb" -gt "$limit_kb" ]]; then
-      echo "aicap: pid $pid RSS ${rss_kb}KB exceeded ${limit_kb}KB cap — killing" >&2
+      echo "caproom: pid $pid RSS ${rss_kb}KB exceeded ${limit_kb}KB cap — killing" >&2
       kill -9 "$pid" 2>/dev/null || true
       exit 137
     fi

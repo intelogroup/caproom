@@ -1,4 +1,4 @@
-# aicap
+# caproom
 
 Memory-cap any command — AI coding agents, builds, background jobs — on macOS/Linux.
 
@@ -9,12 +9,12 @@ macOS has no working per-process memory limit in userspace. Verified empirically
 - `setrlimit(RLIMIT_AS, ...)`, `RLIMIT_DATA`, `RLIMIT_RSS` all return `EINVAL` on modern macOS — the kernel rejects them outright, `ulimit -v` included.
 - launchd's own `HardResourceLimits.ResidentSetSize` is a no-op — a job capped at 100MB was observed running past 590MB, still `state = active`.
 
-So a runaway process — a leaking build tool, an AI agent that gets stuck in a loop, a stray `find /` — has nothing standing between it and system OOM on macOS. `aicap` fills that gap with the two mechanisms that actually work.
+So a runaway process — a leaking build tool, an AI agent that gets stuck in a loop, a stray `find /` — has nothing standing between it and system OOM on macOS. `caproom` fills that gap with the two mechanisms that actually work.
 
 ## What it does
 
 ```
-aicap --limit <mb> -- <command> [args...]
+caproom --limit <mb> -- <command> [args...]
 ```
 
 Two backends, auto-selected:
@@ -27,30 +27,30 @@ Both are honest about their mechanism: neither claims kernel-enforced rlimit, be
 ## Install
 
 ```
-npm install -g @forgememo-cli/aicap
+npm install -g caproom
 ```
 
-or clone and symlink `bin/aicap` onto your `PATH`.
+or clone and symlink `bin/caproom` onto your `PATH`.
 
 ## Usage
 
 ```bash
 # cap a build at 2GB
-aicap --limit 2048 -- npm run build
+caproom --limit 2048 -- npm run build
 
 # cap an AI coding agent run at 512MB
-aicap --limit 512 -- claude -p "refactor this module"
+caproom --limit 512 -- claude -p "refactor this module"
 
 # force the watchdog even if Docker is available
-aicap --limit 1024 --force-watchdog -- ./some-script.sh
+caproom --limit 1024 --force-watchdog -- ./some-script.sh
 
 # use a different docker image for the docker backend (default: node:22-slim)
-aicap --limit 4096 --image python:3.12-slim -- python train.py
+caproom --limit 4096 --image python:3.12-slim -- python train.py
 ```
 
-Env var overrides: `AICAP_LIMIT_MB`, `AICAP_IMAGE`, `AICAP_INTERVAL`.
+Env var overrides: `CAPROOM_LIMIT_MB`, `CAPROOM_IMAGE`, `CAPROOM_INTERVAL`.
 
-On cap breach, `aicap` kills the process and exits `137` (same convention as Docker's own OOM-kill exit code).
+On cap breach, `caproom` kills the process and exits `137` (same convention as Docker's own OOM-kill exit code).
 
 ## Limitations
 

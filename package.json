@@ -1,12 +1,12 @@
 {
-  "name": "@forgememo-cli/aicap",
+  "name": "caproom",
   "version": "0.1.0",
   "description": "Memory-cap any command (AI coding agents, builds, background jobs) on macOS/Linux — real enforcement via Docker cgroups or a polling watchdog, since macOS has no working per-process memory rlimit.",
   "bin": {
-    "aicap": "bin/aicap"
+    "caproom": "bin/caproom"
   },
   "files": [
-    "bin/aicap"
+    "bin/caproom"
   ],
   "keywords": [
     "memory",
@@ -25,6 +25,6 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/intelogroup/aicap.git"
+    "url": "git+https://github.com/intelogroup/caproom.git"
   }
 }
