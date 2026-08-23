@@ -1,0 +1,112 @@
+name: ci
+
+on:
+  push:
+    branches: ['*']
+  pull_request:
+
+jobs:
+  posix:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: syntax
+        run: |
+          bash -n bin/caproom
+          node --check bin/caproom.js
+          node --check bin/caproom-mcp.js
+
+      - name: watchdog kills a single hog past the cap
+        run: |
+          set +e
+          bin/caproom --limit 64 --grace 2 -- node test/hog.js > /tmp/single.log 2>&1
+          cat /tmp/single.log
+          grep -q "exceeded" /tmp/single.log || { echo "FAIL: no breach detected"; exit 1; }
+
+      - name: watchdog kills the TREE and leaves no orphans
+        run: |
+          set +e
+          bin/caproom --limit 200 --grace 2 -- node test/tree-hog.js > /tmp/tree.log 2>&1
+          cat /tmp/tree.log
+          grep -q "killing tree" /tmp/tree.log || { echo "FAIL: tree not killed"; exit 1; }
+          sleep 1
+          SURV=$(pgrep -f 'Buffer.alloc' | wc -l | tr -d ' ')
+          echo "survivors=$SURV"
+          [ "$SURV" = "0" ] || { echo "FAIL: orphans survived"; exit 1; }
+
+      - name: stubborn child ignoring SIGTERM still gets SIGKILLed (exit 137)
+        run: |
+          set +e
+          bin/caproom --limit 200 --grace 2 -- node test/stubborn-hog.js > /tmp/stubborn.log 2>&1
+          cat /tmp/stubborn.log
+          grep -q "SIGKILLed 1 survivor" /tmp/stubborn.log || { echo "FAIL: survivor sweep did not fire"; exit 1; }
+          grep -q "exit 137" /tmp/stubborn.log || { echo "FAIL: wrong exit code"; exit 1; }
+          sleep 1
+          SURV=$(pgrep -f 'Buffer.alloc' | wc -l | tr -d ' ')
+          [ "$SURV" = "0" ] || { echo "FAIL: orphan survived"; exit 1; }
+
+      - name: clean command passes through under the cap
+        run: |
+          bin/caproom --limit 512 -- node -e 'console.log("ok")' | grep -q ok
+
+      - name: top --json emits valid schema-1 output
+        run: |
+          bin/caproom top --json | node -e '
+            let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+              const j=JSON.parse(s);
+              if(j.schema!==1) throw new Error("bad schema");
+              if(!Array.isArray(j.processes)) throw new Error("no processes");
+              console.log("rows="+j.processes.length);
+            });'
+
+      - name: watch observer emits started event and touches nothing
+        run: |
+          sleep 30 &
+          SP=$!
+          timeout 5 bin/caproom watch --threshold-mb 1000000 --interval 1 --json "$SP" > /tmp/watch.ndjson 2>/dev/null || true
+          kill "$SP" 2>/dev/null || true
+          head -1 /tmp/watch.ndjson | node -e '
+            let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+              const j=JSON.parse(s);
+              if(j.event!=="started") throw new Error("expected started, got "+j.event);
+              console.log("watch-ok");
+            });'
+          STATE=$(ps -o state= -p "$SP" 2>/dev/null | head -c1 || true)
+          [ "$STATE" != "T" ] || { echo "FAIL: watcher parked an un-armed process"; exit 1; }
+
+      - name: mcp server handshake + tool list
+        run: |
+          printf '%s\n%s\n%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+            | node bin/caproom-mcp.js > /tmp/mcp.out
+          node -e '
+            const lines=require("fs").readFileSync("/tmp/mcp.out","utf8").trim().split("\n").map(JSON.parse);
+            const init=lines.find(m=>m.id===1); if(!init||!init.result.serverInfo.name) throw new Error("init failed");
+            const tl=lines.find(m=>m.id===2); const names=tl.result.tools.map(t=>t.name);
+            for(const t of ["top","park","wake","watch_start","watch_events","watch_stop","run"])
+              if(!names.includes(t)) throw new Error("missing tool "+t);
+            console.log("mcp-ok:", names.join(","));
+          '
+
+      - name: mcp run tool caps a real process end-to-end
+        run: |
+          printf '%s\n%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+            '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"run","arguments":{"command":["node","test/hog.js"],"limit_mb":64}}}' \
+            | node bin/caproom-mcp.js > /tmp/mcprun.out
+          node -e '
+            const lines=require("fs").readFileSync("/tmp/mcprun.out","utf8").trim().split("\n").map(JSON.parse);
+            const r=lines.find(m=>m.id===4).result.content[0].text;
+            if(!/KILLED BY CAP/.test(r)) { console.error(r); throw new Error("expected cap kill"); }
+            console.log("run-cap-ok");
+          '
