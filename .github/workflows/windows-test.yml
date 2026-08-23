@@ -204,21 +204,16 @@ jobs:
         run: |
           $p = Start-Process powershell -ArgumentList '-NoProfile','-Command','Start-Sleep 5' -PassThru -WindowStyle Hidden
           Start-Sleep -Milliseconds 500
-          $job = Start-Job -ArgumentList $p.Id -ScriptBlock {
-            param($targetPid)
-            & caproom watch --json --threshold-mb 1000000 --interval 1 -- $targetPid 2>$null
-          }
-          if (Wait-Job $job -Timeout 30) { $out = Receive-Job $job }
-          else {
-            Write-Host "TIMEOUT — job output so far:"
-            Receive-Job $job -Keep 2>&1 | ForEach-Object { Write-Host "JOB| $_" }
-            Stop-Job $job
-            Get-Process | Where-Object { $_.ProcessName -match 'node|powershell' } |
-              Select-Object Id,ProcessName,StartTime | Format-Table | Out-String | Write-Host
-            throw "watcher did not exit within 30s"
-          }
-          Remove-Job $job -Force -ErrorAction SilentlyContinue
+          $outFile = "$env:TEMP\watch_events.ndjson"
+          $errFile = "$env:TEMP\watch_err.txt"
+          Remove-Item $outFile,$errFile -ErrorAction SilentlyContinue
+          $w = Start-Process node `
+            -ArgumentList @((Join-Path $PWD 'bin\caproom.js'),'watch','--json','--threshold-mb','1000000','--interval','1','--',"$($p.Id)") `
+            -RedirectStandardOutput $outFile -RedirectStandardError $errFile -NoNewWindow -PassThru
+          # watcher exits by itself once all watched pids exit (~6s); give it 25s max
+          if (-not $w.WaitForExit(25000)) { Stop-Process -Id $w.Id -Force; throw "watcher did not exit within 25s" }
           Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-          $ev = ($out | Select-Object -First 1) | ConvertFrom-Json
-          if ($ev.event -ne 'started') { throw "first event: $($ev.event)" }
-          Write-Host "watch-started-ok mode=$($ev.mode) threshold_kb=$($ev.threshold_kb)"
+          Write-Host "--- stderr ---"; Get-Content $errFile -ErrorAction SilentlyContinue | Select-Object -First 4
+          $first = (Get-Content $outFile -ErrorAction Stop | Select-Object -First 1) | ConvertFrom-Json
+          if ($first.event -ne 'started') { throw "first event: $($first.event)" }
+          Write-Host "watch-started-ok mode=$($first.mode) threshold_kb=$($first.threshold_kb)"
