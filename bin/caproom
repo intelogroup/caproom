@@ -70,6 +70,7 @@ examples:
   caproom park 12345
   caproom wake 12345
   caproom top --json [--pid <pid>] [--park-min-mb <mb>]
+  caproom watch [--threshold-mb <mb>] [--auto-park] [--auto-wake-free-pct <pct>] [--json] <pid...>
   caproom init claude --limit 6144 --grace 10
 EOF
   exit "$code"
@@ -268,8 +269,125 @@ cmd_top() {
   fi
 }
 
-mem_free_pct() {
-  if [[ "$(uname)" == "Darwin" ]]; then
+cmd_watch() {
+  # Daemon: watch explicit pids, emit events when their TREE crosses a
+  # RSS threshold. --auto-park freezes breaching trees (SIGSTOP every pid
+  # in the snapshot) — only for pids passed explicitly, since stopping a
+  # mid-write process risks corruption; naming the pid IS the opt-in.
+  # --auto-wake-free-pct N undoes its own parks when free memory recovers.
+  local threshold_kb=$(( 2048 * 1024 )) interval=5 json=0 auto=0 wake_pct=""
+  local -a pids=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --threshold-mb) threshold_kb=$(( $2 * 1024 )); shift 2 ;;
+      --interval) interval="$2"; shift 2 ;;
+      --auto-park) auto=1; shift ;;
+      --auto-wake-free-pct) wake_pct="$2"; shift 2 ;;
+      --json) json=1; shift ;;
+      *) pids+=("$1"); shift ;;
+    esac
+  done
+  [[ ${#pids[@]} -eq 0 ]] && { echo "usage: caproom watch [--threshold-mb <mb>] [--interval <sec>] [--auto-park] [--auto-wake-free-pct <pct>] [--json] <pid...>" >&2; exit 1; }
+
+  local -a parked_by_us=() breaching=()
+  local mode
+  mode="watch"
+  [[ $auto -eq 1 ]] && mode="auto-park"
+  if [[ $json -eq 1 ]]; then
+    printf '{"schema":1,"event":"started","ts":%s,"mode":"%s","threshold_kb":%s,"pids":[%s]}\n' "$(date +%s)" "$mode" "$threshold_kb" "$(printf '%s,' "${pids[@]}" | sed 's/,$//')"
+  else
+    echo "caproom: watching ${#pids[@]} pid(s), tree threshold $(( threshold_kb / 1024 ))MB, poll ${interval}s$([[ $auto -eq 1 ]] && echo ', AUTO-PARK ARMED')$([[ -n "$wake_pct" ]] && echo ", auto-wake at >=${wake_pct}% free")" >&2
+  fi
+
+  while :; do
+    local -a alive=()
+    local pid i st0
+    for pid in "${pids[@]}"; do
+      kill -0 "$pid" 2>/dev/null && alive+=("$pid")
+    done
+    if [[ ${#alive[@]} -eq 0 ]]; then
+      [[ $json -eq 1 ]] && printf '{"schema":1,"event":"all-exited","ts":%s}\n' "$(date +%s)"
+      echo "caproom: watch: all watched pids exited" >&2
+      exit 0
+    fi
+    pids=("${alive[@]}")
+
+    # Auto-wake first: restore what WE parked once pressure clears.
+    if [[ -n "$wake_pct" && ${#parked_by_us[@]} -gt 0 ]]; then
+      local pct
+      pct=$(mem_free_pct)
+      if [[ "$pct" -ge "$wake_pct" ]]; then
+        local -a woke=()
+        for pid in "${parked_by_us[@]}"; do
+          if kill -0 "$pid" 2>/dev/null && kill -CONT "$pid" 2>/dev/null; then
+            woke+=("$pid")
+            if [[ $json -eq 1 ]]; then
+              printf '{"schema":1,"event":"woke","ts":%s,"pid":%s,"free_pct":%s}\n' "$(date +%s)" "$pid" "$pct"
+            else
+              echo "caproom: watch: free mem ${pct}% >= ${wake_pct}% — waking pid $pid" >&2
+            fi
+          fi
+        done
+        parked_by_us=()
+      fi
+    fi
+
+    read_snapshot
+    for pid in "${pids[@]}"; do
+      local found=""
+      for i in "${!SNAP_PID[@]}"; do
+        [[ "${SNAP_PID[$i]}" == "$pid" ]] && { found="$i"; break; }
+      done
+      [[ -z "$found" ]] && continue
+      st0="${SNAP_ST[$found]:0:1}"
+      [[ "$st0" == "T" || "$st0" == "Z" ]] && continue   # already parked/dead
+      walk_tree "$pid"
+      if [[ "$TREE_RSS_KB" -ge "$threshold_kb" ]]; then
+        local is_breaching=""
+        local ev1
+        for ev1 in ${breaching[@]+"${breaching[@]}"}; do [[ "$ev1" == "$pid" ]] && is_breaching=1 && break; done
+        if [[ -n "$is_breaching" ]]; then continue; fi
+        breaching+=("$pid")
+        if [[ $auto -eq 1 ]]; then
+          local tp stopped=0
+          for tp in "${TREE_PIDS[@]}"; do
+            kill -STOP "$tp" 2>/dev/null && { parked_by_us+=("$tp"); stopped=$(( stopped + 1 )); }
+          done
+          if [[ $json -eq 1 ]]; then
+            printf '{"schema":1,"event":"parked","ts":%s,"pid":%s,"tree_rss_kb":%s,"tree_pids":[%s],"stopped":%s}\n' "$(date +%s)" "$pid" "$TREE_RSS_KB" "$(printf '%s,' "${TREE_PIDS[@]}" | sed 's/,$//')" "$stopped"
+          else
+            echo "caproom: watch: tree of pid $pid hit $(( TREE_RSS_KB / 1024 ))MB (>= $(( threshold_kb / 1024 ))MB) — PARKED tree (${stopped} pids, wake: caproom wake $pid)" >&2
+          fi
+        else
+          if [[ $json -eq 1 ]]; then
+            printf '{"schema":1,"event":"breach","ts":%s,"pid":%s,"tree_rss_kb":%s}\n' "$(date +%s)" "$pid" "$TREE_RSS_KB"
+          else
+            echo "caproom: watch: tree of pid $pid hit $(( TREE_RSS_KB / 1024 ))MB (>= $(( threshold_kb / 1024 ))MB) — no --auto-park, reporting only" >&2
+          fi
+        fi
+      else
+        local -a keep=()
+        local was_breaching=0 ev2
+        for ev2 in ${breaching[@]+"${breaching[@]}"}; do
+          if [[ "$ev2" == "$pid" ]]; then was_breaching=1; else keep+=("$ev2"); fi
+        done
+        if [[ $was_breaching -eq 1 ]]; then
+          breaching=()
+          local k2
+          for k2 in ${keep[@]+"${keep[@]}"}; do breaching+=("$k2"); done
+          if [[ $json -eq 1 ]]; then
+            printf '{"schema":1,"event":"recovered","ts":%s,"pid":%s,"tree_rss_kb":%s}\n' "$(date +%s)" "$pid" "$TREE_RSS_KB"
+          else
+            echo "caproom: watch: pid $pid back under threshold ($(( TREE_RSS_KB / 1024 ))MB)" >&2
+          fi
+        fi
+      fi
+    done
+    sleep "$interval"
+  done
+}
+
+mem_free_pct() {  if [[ "$(uname)" == "Darwin" ]]; then
     local page_size free inactive total_bytes avail_bytes
     page_size=$(vm_stat | awk '/page size of/ {print $8}')
     free=$(vm_stat | awk '/Pages free/ {gsub("\\.","",$3); print $3}')
@@ -330,6 +448,7 @@ case "${1:-}" in
   wake) shift; cmd_wake "$@"; exit 0 ;;
   status) shift; cmd_status "$@"; exit 0 ;;
   top) shift; cmd_top "$@"; exit 0 ;;
+  watch) shift; cmd_watch "$@"; exit 0 ;;
   guard) shift; cmd_guard "$@"; exit 0 ;;
   init) shift; cmd_init "$@"; exit 0 ;;
   help|-h|--help) usage help ;;
