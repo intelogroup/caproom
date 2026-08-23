@@ -69,6 +69,7 @@ examples:
   caproom --limit 4096 --docker --image python:3.12-slim -- python train.py
   caproom park 12345
   caproom wake 12345
+  caproom top --json [--pid <pid>] [--park-min-mb <mb>]
   caproom init claude --limit 6144 --grace 10
 EOF
   exit "$code"
@@ -118,6 +119,153 @@ cmd_status() {
   local pid="${1:-}"
   [[ -z "$pid" ]] && { echo "usage: caproom status <pid>" >&2; exit 1; }
   ps -o pid,stat,rss,etime,command -p "$pid" 2>/dev/null || { echo "caproom: no such pid $pid" >&2; exit 1; }
+}
+
+# ---- process-tree inventory (top / watch foundation) ----
+
+# One ps pass filling the SNAP_* global arrays for the current user.
+read_snapshot() {
+  SNAP_PID=(); SNAP_PPID=(); SNAP_RSS=(); SNAP_ST=(); SNAP_ET=(); SNAP_CMD=()
+  local myuid uid pid ppid rss st et cmd
+  myuid="$(id -u)"
+  while read -r uid pid ppid rss st et cmd; do
+    [[ "$uid" != "$myuid" ]] && continue
+    SNAP_PID+=("$pid"); SNAP_PPID+=("$ppid"); SNAP_RSS+=("${rss:-0}")
+    SNAP_ST+=("${st:-?}"); SNAP_ET+=("${et:-0}"); SNAP_CMD+=("${cmd:-}")
+  done < <(ps -eo uid=,pid=,ppid=,rss=,state=,etime=,command=)
+}
+
+# Walk the subtree of $1 over the existing SNAP_* arrays, filling
+# TREE_PIDS / TREE_RSS_KB. Does NOT re-read ps — cheap enough to call
+# once per tree root from a single snapshot.
+walk_tree() {
+  local root="$1" cur i j
+  local -a lpids=("${SNAP_PPID[@]}") lq=()
+  TREE_PIDS=(); TREE_RSS_KB=0
+  lq=("$root")
+  while [[ ${#lq[@]} -gt 0 ]]; do
+    cur="${lq[0]}"
+    if [[ ${#lq[@]} -gt 1 ]]; then lq=("${lq[@]:1}"); else lq=(); fi
+    for i in "${!SNAP_PID[@]}"; do
+      if [[ "${SNAP_PID[$i]}" == "$cur" ]]; then
+        TREE_PIDS+=("$cur")
+        TREE_RSS_KB=$(( TREE_RSS_KB + SNAP_RSS[$i] ))
+        for j in "${!lpids[@]}"; do
+          if [[ "${lpids[$j]}" == "$cur" ]]; then
+            lq+=("${SNAP_PID[$j]}")
+            lpids[$j]=""
+          fi
+        done
+        break
+      fi
+    done
+  done
+}
+
+json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/ }"
+  s="${s//$'\r'/ }"
+  s="${s//$'\t'/ }"
+  printf '%s' "$s"
+}
+
+cmd_top() {
+  local json=0 park_min_kb=$(( 512 * 1024 )) filter_pid=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json) json=1; shift ;;
+      --park-min-mb) park_min_kb=$(( $2 * 1024 )); shift 2 ;;
+      --pid) filter_pid="$2"; shift 2 ;;
+      *) echo "caproom top: unknown option $1" >&2; exit 1 ;;
+    esac
+  done
+
+  read_snapshot
+  [[ ${#SNAP_PID[@]} -eq 0 ]] && { [[ $json -eq 1 ]] && printf '{"schema":1,"ts":%s,"limit_mb_default":%s,"processes":[]}\n' "$(date +%s)" "${CAPROOM_LIMIT_MB:-4096}"; return 0; }
+
+  # Tree roots: parents outside the visible set (or init-reparented).
+  local -a roots=()
+  local i j p found
+  if [[ -n "$filter_pid" ]]; then
+    found=""
+    for i in "${!SNAP_PID[@]}"; do
+      [[ "${SNAP_PID[$i]}" == "$filter_pid" ]] && { roots+=("$filter_pid"); found=1; break; }
+    done
+    if [[ -z "$found" ]]; then
+      echo "caproom: no such pid $filter_pid (or not owned by you)" >&2
+      exit 1
+    fi
+  else
+    for i in "${!SNAP_PID[@]}"; do
+      [[ "${SNAP_PID[$i]}" == "$$" ]] && continue   # never report ourselves
+      p="${SNAP_PPID[$i]}"
+      if [[ "$p" == "1" ]]; then roots+=("${SNAP_PID[$i]}"); continue; fi
+      found=""
+      for j in "${!SNAP_PID[@]}"; do
+        if [[ "${SNAP_PID[$j]}" == "$p" ]]; then found=1; break; fi
+      done
+      [[ -z "$found" ]] && roots+=("${SNAP_PID[$i]}")
+    done
+  fi
+
+  # Walk each root once; keep results in parallel arrays, then sort by
+  # tree RSS descending via a sortable temp stream.
+  local -a r_pid=() r_trss=() r_tpids=() r_st=() r_et=() r_cmd=() order=()
+  for p in "${roots[@]}"; do
+    walk_tree "$p"
+    local tjoin=""
+    [[ ${#TREE_PIDS[@]} -gt 0 ]] && tjoin="$(printf '%s,' "${TREE_PIDS[@]}")" && tjoin="${tjoin%,}"
+    for i in "${!SNAP_PID[@]}"; do
+      if [[ "${SNAP_PID[$i]}" == "$p" ]]; then
+        r_pid+=("$p"); r_trss+=("$TREE_RSS_KB")
+        r_tpids+=("$tjoin")
+        r_st+=("${SNAP_ST[$i]}"); r_et+=("${SNAP_ET[$i]}")
+        r_cmd+=("${SNAP_CMD[$i]}")
+        order+=("$(printf '%010d %d\n' "$TREE_RSS_KB" $(( ${#r_pid[@]} - 1 )))")
+        break
+      fi
+    done
+  done
+
+  if [[ $json -eq 1 ]]; then
+    local ts out='[' first=1 idx state cand reason kb
+    ts="$(date +%s)"
+    local -a sorted
+    sorted=($(printf '%s\n' "${order[@]:-}" | sort -rn | awk '{print $2}'))
+    for idx in "${sorted[@]:-}"; do
+      [[ -z "$idx" ]] && continue
+      kb="${r_trss[$idx]}"
+      local st0="${r_st[$idx]:0:1}"
+      case "$st0" in
+        T) state="parked" ;;
+        Z) state="zombie" ;;
+        *) state="running" ;;
+      esac
+      cand=false; reason=""
+      if [[ "$state" == "running" && ( "$st0" == "S" || "$st0" == "I" ) ]] && [[ "$kb" -ge "$park_min_kb" ]]; then
+        cand=true
+        reason="root sleeping + tree_rss ${kb}KB >= ${park_min_kb}KB park threshold"
+      fi
+      [[ $first -eq 1 ]] || out+=','
+      first=0
+      out+="{\"pid\":${r_pid[$idx]},\"cmd\":\"$(json_escape "${r_cmd[$idx]}")\",\"tree_rss_kb\":${kb},\"tree_pids\":[${r_tpids[$idx]}],\"state\":\"$state\",\"park_candidate\":$cand,\"reason\":\"$(json_escape "$reason")\"}"
+    done
+    out+=']'
+    printf '{"schema":1,"ts":%s,"limit_mb_default":%s,"processes":%s}\n' "$ts" "${CAPROOM_LIMIT_MB:-4096}" "$out"
+  else
+    local idx mb
+    printf '%-8s %10s %-8s %-9s %s\n' PID TREE_MB STATE ETIME COMMAND
+    local -a sorted
+    sorted=($(printf '%s\n' "${order[@]:-}" | sort -rn | awk '{print $2}'))
+    for idx in "${sorted[@]:-}"; do
+      [[ -z "$idx" ]] && continue
+      mb=$(( r_trss[idx] / 1024 ))
+      case "${r_st[$idx]}" in T) printf '%-8s %10s %-8s %-9s %s\n' "${r_pid[$idx]}" "$mb" PARKED "${r_et[$idx]}" "${r_cmd[$idx]:0:60}" ;; *) printf '%-8s %10s %-8s %-9s %s\n' "${r_pid[$idx]}" "$mb" "-" "${r_et[$idx]}" "${r_cmd[$idx]:0:60}" ;; esac
+    done
+  fi
 }
 
 mem_free_pct() {
@@ -181,6 +329,7 @@ case "${1:-}" in
   park) shift; cmd_park "$@"; exit 0 ;;
   wake) shift; cmd_wake "$@"; exit 0 ;;
   status) shift; cmd_status "$@"; exit 0 ;;
+  top) shift; cmd_top "$@"; exit 0 ;;
   guard) shift; cmd_guard "$@"; exit 0 ;;
   init) shift; cmd_init "$@"; exit 0 ;;
   help|-h|--help) usage help ;;
@@ -218,40 +367,11 @@ run_docker() {
 }
 
 collect_tree() {
-  # BFS over the descendant tree of $1, filling globals TREE_PIDS and
-  # TREE_RSS_KB. Agents keep their memory in children (MCP servers, bundler
-  # daemons, headless browsers) while the parent's own RSS stays flat — a
-  # top-pid-only check never fires on them. One ps snapshot per poll; plain
-  # indexed arrays only (no declare -A) so macOS's stock bash 3.2 works.
-  local root="$1"
-  local -a pids=() ppids=() kb=() queue=()
-  local pid ppid k cur i j
-  TREE_PIDS=()
-  TREE_RSS_KB=0
-  while read -r pid ppid k; do
-    [[ -n "$pid" ]] || continue
-    pids+=("$pid"); ppids+=("$ppid"); kb+=("$k")
-  done < <(ps -eo pid=,ppid=,rss=)
-
-  queue=("$root")
-  while [[ ${#queue[@]} -gt 0 ]]; do
-    cur="${queue[0]}"
-    if [[ ${#queue[@]} -gt 1 ]]; then queue=("${queue[@]:1}"); else queue=(); fi
-    for ((i = 0; i < ${#pids[@]}; i++)); do
-      if [[ "${pids[$i]}" == "$cur" && -n "${kb[$i]}" ]]; then
-        TREE_PIDS+=("$cur")
-        TREE_RSS_KB=$(( TREE_RSS_KB + kb[$i] ))
-        kb[$i]=""
-        for ((j = 0; j < ${#ppids[@]}; j++)); do
-          if [[ "${ppids[$j]}" == "$cur" ]]; then
-            queue+=("${pids[$j]}")
-            ppids[$j]=""
-          fi
-        done
-        break
-      fi
-    done
-  done
+  # Snapshot ps once and walk the descendant tree of $1 into TREE_PIDS /
+  # TREE_RSS_KB (see read_snapshot / walk_tree). Plain indexed arrays only
+  # so macOS's stock bash 3.2 works.
+  read_snapshot
+  walk_tree "$1"
 }
 
 run_watchdog() {
