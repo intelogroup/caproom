@@ -237,8 +237,18 @@ function New-CappedProcess {
     # pipe buffer), and by the time WaitForExit() returns the .Result is
     # already available synchronously.
     param([string]$Exe, [string]$Args)
+    # Resolve bare command names (e.g. "node") to a full path ourselves --
+    # PATH search under a redirected/no-console child was the last unverified
+    # link after ruling out StreamReader and Job Objects; an
+    # App-Execution-Alias stub earlier on PATH than the real interpreter
+    # would launch, exit 0, and write nothing, matching the symptom exactly.
+    $resolvedExe = $Exe
+    $cmd = Get-Command $Exe -ErrorAction SilentlyContinue
+    if ($cmd) { $resolvedExe = $cmd.Source }
+    [Console]::Error.WriteLine("caproom: debug resolvedExe=[$resolvedExe] exists=$(Test-Path $resolvedExe) size=$((Get-Item $resolvedExe -ErrorAction SilentlyContinue).Length)")
+
     $psi = New-Object Diagnostics.ProcessStartInfo
-    $psi.FileName = $Exe
+    $psi.FileName = $resolvedExe
     $psi.Arguments = $Args
     $psi.UseShellExecute = $false
     $psi.RedirectStandardOutput = $true
