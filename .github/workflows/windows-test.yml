@@ -147,3 +147,33 @@ jobs:
           if ($after -ge $before) { throw "EmptyWorkingSet did not reduce the working set" }
           if ($p.HasExited) { throw "park killed the process - it must keep running" }
           Stop-Process -Id $p.Id -Force
+
+      # Each holder stays under the 200MB cap alone (~130MB with node's own
+      # baseline); only the TREE crosses it. Proves the parent->child walk,
+      # not a top-pid check, is doing the enforcement.
+      - name: watchdog kills when only the CHILDREN cross the cap (tree walk)
+        shell: pwsh
+        run: |
+          $log = & caproom --limit 200 --force-watchdog -- node test/tree-hog.js 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $log
+          Write-Host "exit code: $code"
+          if ($code -eq 0) { throw "tree exceeded a 200MB cap but exited 0 - tree walk did not enforce" }
+          if ($log -notmatch 'killing tree') { throw "breach was not attributed to the tree walk" }
+          exit 0
+
+      # MARK-A prints immediately, MARK-B three seconds later. If output were
+      # relayed only at exit both arrivals would be identical; streaming must
+      # show a ~3s gap.
+      - name: watchdog streams output before the child exits
+        shell: pwsh
+        run: |
+          $arrivals = @{}
+          & caproom --limit 512 --force-watchdog -- node -e "console.log('MARK-A'); setTimeout(function(){console.log('MARK-B');},3000);" 2>$null | ForEach-Object {
+            if ($_ -match 'MARK-([AB])') { $arrivals[$Matches[1]] = [DateTime]::Now }
+          }
+          if (-not $arrivals['A'] -or -not $arrivals['B']) { throw "markers not observed: $($arrivals.Keys -join ',')" }
+          $gap = ($arrivals['B'] - $arrivals['A']).TotalMilliseconds
+          Write-Host "MARK-A -> MARK-B gap: ${gap}ms"
+          if ($gap -lt 2000) { throw "output relayed only at exit (A->B gap ${gap}ms), streaming did not engage" }
+          exit 0
