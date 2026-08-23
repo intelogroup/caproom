@@ -21,6 +21,9 @@ usage: caproom [--limit <mb>] [--interval <sec>] -- <command> [args...]
        caproom status <pid>
        caproom guard [--threshold <pct>] [--interval <sec>] <pid...>
        caproom init <command> [--limit <mb>]
+       caproom top --json [--pid <pid>] [--park-min-mb <mb>]
+       caproom watch [--threshold-mb <mb>] [--auto-park] [--auto-wake-free-pct <pct>] [--json] <pid...>
+       caproom setup / freemem
 
   --limit <mb>     memory cap in MB (default: 4096). On Windows this caps
                     committed virtual memory (Job Object ProcessMemoryLimit);
@@ -406,6 +409,204 @@ function Invoke-Capped {
 
 if ($args.Count -eq 0) { Show-Usage }
 
+$script:CaproomNtLoaded = $false
+function Ensure-NtSuspend {
+    # Whole-tree park needs NtSuspendProcess/NtResumeProcess (ntdll) —
+    # the Windows analogue of kill -STOP/-CONT. Loaded lazily, once.
+    if ($script:CaproomNtLoaded) { return }
+    try {
+        Add-Type -Namespace Caproom -Name Nt -MemberDefinition @'
+[DllImport("ntdll.dll")] public static extern int NtSuspendProcess(IntPtr processHandle);
+[DllImport("ntdll.dll")] public static extern int NtResumeProcess(IntPtr processHandle);
+[DllImport("kernel32.dll", SetLastError=true)] public static extern IntPtr OpenProcess(int desiredAccess, bool inheritHandle, int processId);
+[DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr handle);
+'@
+        $script:CaproomNtLoaded = $true
+    } catch {
+        [Console]::Error.WriteLine('caproom watch: cannot load ntdll suspend/resume — --auto-park unavailable')
+        throw
+    }
+}
+
+function Get-CaproomSnapshot {
+    # One CIM query -> ByPid map, Children map (only live parents), Roots
+    # (pids whose parent is not in the snapshot). Mirrors posix read_snapshot.
+    $procs = @(Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,Name,CommandLine,WorkingSetSize)
+    $byPid = @{}
+    foreach ($p in $procs) { $byPid[[int]$p.ProcessId] = $p }
+    $children = @{}
+    foreach ($p in $procs) {
+        $ppid = [int]$p.ParentProcessId
+        if ($byPid.ContainsKey($ppid)) {
+            if (-not $children.ContainsKey($ppid)) { $children[$ppid] = New-Object System.Collections.Generic.List[int] }
+            $children[$ppid].Add([int]$p.ProcessId)
+        }
+    }
+    $roots = @($procs | Where-Object { -not $byPid.ContainsKey([int]$_.ParentProcessId) } | ForEach-Object { [int]$_.ProcessId })
+    return @{ ByPid=$byPid; Children=$children; Roots=$roots }
+}
+
+function Get-TreeStats {
+    param([hashtable]$Snap, [int]$RootPid)
+    $rss = [long]0
+    $pids = New-Object System.Collections.Generic.List[int]
+    $stack = New-Object System.Collections.Generic.Stack[int]
+    $seen = @{}
+    $stack.Push($RootPid)
+    while ($stack.Count -gt 0) {
+        $cur = $stack.Pop()
+        if ($seen.ContainsKey($cur)) { continue }
+        $seen[$cur] = $true
+        if (-not $Snap.ByPid.ContainsKey($cur)) { continue }
+        $proc = $Snap.ByPid[$cur]
+        if ($proc.WorkingSetSize) { $rss += [long]$proc.WorkingSetSize }
+        $pids.Add($cur)
+        if ($Snap.Children.ContainsKey($cur)) { foreach ($c in $Snap.Children[$cur]) { $stack.Push($c) } }
+    }
+    return @{ RssKb = [long]($rss / 1KB); Pids = $pids }
+}
+
+function Invoke-Top {
+    # schema:1 rows identical in shape to the POSIX build. One honest
+    # divergence: Windows exposes no cheap sleep-state, so state is always
+    # 'running' and park_candidate keys off tree size alone — the reason
+    # string says so instead of pretending a sleep check happened.
+    param([int]$FilterPid = 0, [int]$ParkMinMb = 512)
+    $snap = Get-CaproomSnapshot
+    $ts = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $limitMb = 4096; if ($env:CAPROOM_LIMIT_MB) { $limitMb = [int]$env:CAPROOM_LIMIT_MB }
+    $parkMinKb = [long]$ParkMinMb * 1024
+    $rows = New-Object System.Collections.Generic.List[object]
+    foreach ($root in $snap.Roots) {
+        if ($FilterPid -ne 0 -and $root -ne $FilterPid) { continue }
+        $st = Get-TreeStats -Snap $snap -RootPid $root
+        $cmd = ''
+        if ($snap.ByPid.ContainsKey($root)) {
+            $procRow = $snap.ByPid[$root]
+            if ($procRow.CommandLine) { $cmd = [string]$procRow.CommandLine } else { $cmd = [string]$procRow.Name }
+        }
+        $cand = $false; $reason = ''
+        if ([long]$st.RssKb -ge $parkMinKb) {
+            $cand = $true
+            $reason = "tree_rss $($st.RssKb)KB >= ${parkMinKb}KB park threshold (win32: no sleep-state check)"
+        }
+        $rows.Add([pscustomobject]@{
+            pid = $root; cmd = $cmd; tree_rss_kb = $st.RssKb
+            tree_pids = @($st.Pids.ToArray()); state = 'running'
+            park_candidate = $cand; reason = $reason
+        })
+    }
+    $envelope = [pscustomobject]@{ schema = 1; ts = $ts; limit_mb_default = $limitMb; processes = @($rows.ToArray()) }
+    ConvertTo-Json -Compress -Depth 6 -InputObject $envelope
+}
+
+function Invoke-Watch {
+    # Same NDJSON contract as the POSIX watcher (schema:1 events on stdout
+    # under --json). Explicit pids only; naming the pid IS the opt-in for
+    # --auto-park, same rule as POSIX.
+    $thresholdMb = 2048; $intervalSec = 5.0; $auto = $false; $wake = -1.0; $json = $false
+    $targets = New-Object System.Collections.Generic.List[int]
+    for ($i = 0; $i -lt $args.Count; $i++) {
+        switch ($args[$i]) {
+            '--threshold-mb'        { $thresholdMb = [int]$args[$i + 1]; $i++ }
+            '--interval'            { $intervalSec = [double]$args[$i + 1]; $i++ }
+            '--auto-park'           { $auto = $true }
+            '--auto-wake-free-pct'  { $wake = [double]$args[$i + 1]; $i++ }
+            '--json'                { $json = $true }
+            default {
+                try { $targets.Add([int]$args[$i]) }
+                catch { [Console]::Error.WriteLine("caproom: unknown watch arg $($args[$i])"); exit 1 }
+            }
+        }
+    }
+    if ($targets.Count -eq 0) {
+        [Console]::Error.WriteLine('usage: caproom watch [--threshold-mb <mb>] [--interval <sec>] [--auto-park] [--auto-wake-free-pct <pct>] [--json] <pid...>')
+        exit 1
+    }
+
+    function Emit([object]$Ev) {
+        [Console]::Out.WriteLine((ConvertTo-Json -Compress -Depth 6 -InputObject $Ev))
+    }
+
+    $mode = 'watch'; if ($auto) { $mode = 'auto-park' }
+    $ts0 = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    if ($json) {
+        Emit ([pscustomobject]@{ schema = 1; event = 'started'; ts = $ts0; mode = $mode; threshold_kb = ($thresholdMb * 1024); pids = @($targets.ToArray()) })
+    } else {
+        $armed = ''; if ($auto) { $armed = ', AUTO-PARK ARMED' }
+        [Console]::Error.WriteLine("caproom: watching $($targets.Count) pid(s), tree threshold ${thresholdMb}MB, poll ${intervalSec}s$armed")
+    }
+
+    $parkedByUs = New-Object System.Collections.Generic.List[int]
+    $breaching = @{}
+    while ($true) {
+        $liveSet = @{}
+        foreach ($q in @(Get-CimInstance Win32_Process -Property ProcessId)) { $liveSet[[int]$q.ProcessId] = $true }
+        $alive = New-Object System.Collections.Generic.List[int]
+        foreach ($tpid in $targets) { if ($liveSet.ContainsKey($tpid)) { $alive.Add($tpid) } }
+        if ($alive.Count -eq 0) {
+            if ($json) { Emit ([pscustomobject]@{ schema = 1; event = 'all-exited'; ts = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() }) }
+            [Console]::Error.WriteLine('caproom: watch: all watched pids exited')
+            exit 0
+        }
+        $targets = $alive
+
+        if ($wake -ge 0 -and $parkedByUs.Count -gt 0) {
+            $os = Get-CimInstance Win32_OperatingSystem
+            $pct = [int]($os.FreePhysicalMemory * 100 / $os.TotalVisibleMemorySize)
+            if ($pct -ge $wake) {
+                Ensure-NtSuspend
+                foreach ($wpid in @($parkedByUs.ToArray())) {
+                    if (-not $liveSet.ContainsKey($wpid)) { continue }
+                    $h = [Caproom.Nt]::OpenProcess(0x0800, $false, $wpid)
+                    if ($h -ne [IntPtr]::Zero) {
+                        [void][Caproom.Nt]::NtResumeProcess($h); [void][Caproom.Nt]::CloseHandle($h)
+                        if ($json) { Emit ([pscustomobject]@{ schema = 1; event = 'woke'; ts = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds(); pid = $wpid; free_pct = $pct }) }
+                        else { [Console]::Error.WriteLine("caproom: watch: free mem ${pct}% >= ${wake}% — resuming pid $wpid") }
+                    }
+                }
+                $parkedByUs.Clear()
+            }
+        }
+
+        $snap = Get-CaproomSnapshot
+        $threshKb = [long]$thresholdMb * 1024
+        foreach ($tpid in $targets) {
+            if (-not $snap.ByPid.ContainsKey($tpid)) { continue }
+            $st = Get-TreeStats -Snap $snap -RootPid $tpid
+            if ([long]$st.RssKb -ge $threshKb) {
+                if ($breaching.ContainsKey($tpid)) { continue }
+                $breaching[$tpid] = $true
+                $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                if ($auto) {
+                    Ensure-NtSuspend
+                    $stopped = 0
+                    foreach ($cp in $st.Pids) {
+                        $h = [Caproom.Nt]::OpenProcess(0x0800, $false, $cp)
+                        if ($h -ne [IntPtr]::Zero) {
+                            [void][Caproom.Nt]::NtSuspendProcess($h); [void][Caproom.Nt]::CloseHandle($h)
+                            $parkedByUs.Add($cp); $stopped++
+                        }
+                    }
+                    if ($json) { Emit ([pscustomobject]@{ schema = 1; event = 'parked'; ts = $now; pid = $tpid; tree_rss_kb = $st.RssKb; tree_pids = @($st.Pids.ToArray()); stopped = $stopped }) }
+                    else { [Console]::Error.WriteLine("caproom: watch: tree of pid $tpid hit $($st.RssKb)KB (>= $([int]$threshKb)KB) — PARKED tree ($stopped pids)") }
+                } else {
+                    if ($json) { Emit ([pscustomobject]@{ schema = 1; event = 'breach'; ts = $now; pid = $tpid; tree_rss_kb = $st.RssKb }) }
+                    else { [Console]::Error.WriteLine("caproom: watch: tree of pid $tpid hit $($st.RssKb)KB (>= $([int]$threshKb)KB) — no --auto-park, reporting only") }
+                }
+            } else {
+                if ($breaching.ContainsKey($tpid)) {
+                    $breaching.Remove($tpid)
+                    $now2 = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                    if ($json) { Emit ([pscustomobject]@{ schema = 1; event = 'recovered'; ts = $now2; pid = $tpid; tree_rss_kb = $st.RssKb }) }
+                    else { [Console]::Error.WriteLine("caproom: watch: pid $tpid back under threshold ($($st.RssKb)KB)") }
+                }
+            }
+        }
+        Start-Sleep -Seconds $intervalSec
+    }
+}
+
 function Invoke-Setup {
     # Bind headroom management to PowerShell sessions in ANY terminal:
     # writes ~/.caproom/shell.ps1 (single source) and marker-patches
@@ -466,6 +667,23 @@ switch ($args[0]) {
     'freemem' {
         $os = Get-CimInstance Win32_OperatingSystem
         Write-Output ([int]($os.FreePhysicalMemory * 100 / $os.TotalVisibleMemorySize))
+        exit 0
+    }
+    'top' {
+        $fpid = 0; $parkMin = 512
+        for ($i = 1; $i -lt $args.Count; $i++) {
+            switch ($args[$i]) {
+                '--json'         { }
+                '--pid'          { $fpid = [int]$args[$i + 1]; $i++ }
+                '--park-min-mb'  { $parkMin = [int]$args[$i + 1]; $i++ }
+                default { [Console]::Error.WriteLine("caproom: unknown top flag $($args[$i])"); exit 1 }
+            }
+        }
+        Invoke-Top -FilterPid $fpid -ParkMinMb $parkMin
+        exit 0
+    }
+    'watch' {
+        Invoke-Watch @($args | Select-Object -Skip 1)
         exit 0
     }
     'park'   {

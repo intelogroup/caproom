@@ -16,6 +16,7 @@ jobs:
           node-version: 22
 
       - name: Parse check
+        run: powershell -NoProfile -Command "$t=$null;$e=$null;[void][System.Management.Automation.Language.Parser]::ParseFile('bin/caproom.ps1',[ref]$t,[ref]$e); if($e.Count){$e|%{Write-Error $_.Message};exit 1}else{'PS-PARSE-OK'}"
         shell: pwsh
         run: |
           $errs = $null
@@ -188,3 +189,24 @@ jobs:
           Write-Host "MARK-A -> MARK-B gap: ${gap}ms"
           if ($gap -lt 2000) { throw "output relayed only at exit (A->B gap ${gap}ms), streaming did not engage" }
           exit 0
+
+      - name: top --json emits schema-1 envelope
+        shell: powershell
+        run: |
+          $json = caproom top --json | ConvertFrom-Json
+          if ($json.schema -ne 1) { throw "schema=$($json.schema)" }
+          if (-not $json.processes) { throw "no processes" }
+          $self = $json.processes | Where-Object { $_.cmd -match 'powershell' } | Select-Object -First 1
+          if ($self) { Write-Host "sample row: pid=$($self.pid) rss_kb=$($self.tree_rss_kb) pids=$($self.tree_pids.Count)" }
+          Write-Host "top-ok rows=$($json.processes.Count)"
+
+      - name: watch observer emits started event (NDJSON on stdout)
+        shell: powershell
+        run: |
+          $p = Start-Process powershell -ArgumentList '-NoProfile','-Command','Start-Sleep 20' -PassThru -WindowStyle Hidden
+          Start-Sleep -Milliseconds 500
+          $out = & caproom watch --json --threshold-mb 1000000 --interval 1 -- $p.Id 2>$null
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          $ev = ($out | Select-Object -First 1) | ConvertFrom-Json
+          if ($ev.event -ne 'started') { throw "first event: $($ev.event)" }
+          Write-Host "watch-started-ok mode=$($ev.mode) threshold_kb=$($ev.threshold_kb)"
