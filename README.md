@@ -157,6 +157,16 @@ Naming the pid IS the per-process opt-in — there is no system-wide mode, since
 
 Typical loop: `top --json` finds candidates → `watch --auto-park` babysits them during heavy builds → explicit or automatic wake restores them after.
 
+## MCP server — native agent access
+
+`npm i -g caproom` also installs `caproom-mcp`, a zero-dependency MCP server (stdio) exposing the agent interface as tools:
+
+```json
+{ "mcpServers": { "caproom": { "command": "caproom-mcp" } } }
+```
+
+Tools: `top` (tree inventory, stable schema), `park`/`wake`, `watch_start`/`watch_events`/`watch_stop` (daemon lifecycle, NDJSON events), and `run` (execute a command under a cap, returns a KILLED-BY-CAP verdict at exit 137). Same gating as the CLI: watch requires explicit pids; auto-park is opt-in per watcher.
+
 ## What it never touches
 
 caproom only watches OS-level RSS and sends signals (`SIGTERM`/`SIGKILL`/`SIGSTOP`/`SIGCONT`). The watchdog backend runs the wrapped command as a direct child with stdin/stdout/stderr passed straight through — no pipe, no buffering, no interception. The Docker backend passes stdio through the same way (`docker run -i`). caproom never reads, modifies, or truncates anything the wrapped process reads or writes — including an AI agent's own conversation/context stream. It manages RAM headroom only, nothing else.
