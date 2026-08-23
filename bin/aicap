@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# aicap — memory-cap any command (AI coding agents, builds, background jobs)
+# on macOS/Linux. macOS has no working RLIMIT_AS/DATA/RSS or launchd RSS
+# enforcement (verified empirically — both are no-ops on modern macOS), so
+# this uses whichever real enforcement mechanism is available:
+#   1. Docker cgroup (--memory) — hard cap, zero race window. Used when
+#      `docker` is installed and the daemon is running.
+#   2. Polling watchdog (ps RSS + SIGKILL) — fallback, no dependencies,
+#      works everywhere, has a small race window (poll interval).
+set -euo pipefail
+
+usage() {
+  cat >&2 << 'EOF'
+usage: aicap [--limit <mb>] [--image <docker-image>] [--interval <sec>] -- <command> [args...]
+
+  --limit <mb>     memory cap in MB (default: 4096)
+  --image <name>   docker image to run the command in, when using the docker
+                    backend (default: node:22-slim)
+  --interval <sec> watchdog poll interval in seconds, fallback backend only
+                    (default: 0.2)
+  --force-watchdog force the polling watchdog even if Docker is available
+
+env vars (override flags): AICAP_LIMIT_MB, AICAP_IMAGE, AICAP_INTERVAL
+
+examples:
+  aicap --limit 2048 -- npm run build
+  aicap --limit 512 -- claude --dangerously-skip-permissions -p "task"
+EOF
+  exit 1
+}
+
+LIMIT_MB="${AICAP_LIMIT_MB:-4096}"
+IMAGE="${AICAP_IMAGE:-node:22-slim}"
+INTERVAL="${AICAP_INTERVAL:-0.2}"
+FORCE_WATCHDOG=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --limit) LIMIT_MB="$2"; shift 2 ;;
+    --image) IMAGE="$2"; shift 2 ;;
+    --interval) INTERVAL="$2"; shift 2 ;;
+    --force-watchdog) FORCE_WATCHDOG=1; shift ;;
+    --) shift; break ;;
+    -h|--help) usage ;;
+    *) break ;;
+  esac
+done
+
+[[ $# -eq 0 ]] && usage
+
+docker_available() {
+  [[ "$FORCE_WATCHDOG" -eq 0 ]] && command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1
+}
+
+run_docker() {
+  echo "aicap: docker cgroup backend, limit=${LIMIT_MB}m image=${IMAGE}" >&2
+  exec docker run --rm -i \
+    --memory="${LIMIT_MB}m" --memory-swap="${LIMIT_MB}m" \
+    -v "$PWD:/work" -w /work "$IMAGE" "$@"
+}
+
+run_watchdog() {
+  echo "aicap: watchdog backend (docker unavailable), limit=${LIMIT_MB}m poll=${INTERVAL}s" >&2
+  local limit_kb=$(( LIMIT_MB * 1024 ))
+  "$@" &
+  local pid=$!
+  local exit_code=0
+  while kill -0 "$pid" 2>/dev/null; do
+    local rss_kb
+    rss_kb=$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ')
+    if [[ -n "$rss_kb" && "$rss_kb" -gt "$limit_kb" ]]; then
+      echo "aicap: pid $pid RSS ${rss_kb}KB exceeded ${limit_kb}KB cap — killing" >&2
+      kill -9 "$pid" 2>/dev/null || true
+      exit 137
+    fi
+    sleep "$INTERVAL"
+  done
+  wait "$pid" || exit_code=$?
+  exit "$exit_code"
+}
+
+if docker_available; then
+  run_docker "$@"
+else
+  run_watchdog "$@"
+fi
