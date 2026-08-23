@@ -182,12 +182,16 @@ function New-CappedProcess {
     # at all) silently lost the child's stdout in CI: caproom is invoked as
     # powershell.exe -File caproom.ps1 from the Node shim, itself invoked
     # from a pwsh.EXE step that captures via a pipe (`| Out-String`) -- that
-    # nesting breaks console-handle inheritance. The only pattern that is
-    # reliable through an arbitrary number of process hops is explicit
-    # stream redirection with an async relay, so that's what this does:
-    # pipes are read and written through verbatim, not buffered or altered,
-    # preserving the "never touch what the wrapped process reads/writes"
-    # guarantee just as much as inherited handles would.
+    # nesting breaks console-handle inheritance. A Register-ObjectEvent relay
+    # was tried next and also failed: its callbacks only run when the
+    # PowerShell engine's event queue is pumped, but WaitForExit() blocks the
+    # single script thread, and this function's caller calls `exit`
+    # immediately after -- the queued output events never got a chance to
+    # fire before the process ended. ReadToEndAsync() sidesteps the engine's
+    # event queue entirely: the reads run on the .NET thread pool, are
+    # started before the blocking wait (so nothing can deadlock on a full
+    # pipe buffer), and by the time WaitForExit() returns the .Result is
+    # already available synchronously.
     param([string]$Exe, [string]$Args)
     $psi = New-Object Diagnostics.ProcessStartInfo
     $psi.FileName = $Exe
@@ -198,18 +202,26 @@ function New-CappedProcess {
 
     $proc = New-Object Diagnostics.Process
     $proc.StartInfo = $psi
-    $proc.EnableRaisingEvents = $true
-    Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived -Action {
-        if ($null -ne $EventArgs.Data) { [Console]::Out.WriteLine($EventArgs.Data) }
-    } | Out-Null
-    Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived -Action {
-        if ($null -ne $EventArgs.Data) { [Console]::Error.WriteLine($EventArgs.Data) }
-    } | Out-Null
-
     [void]$proc.Start()
-    $proc.BeginOutputReadLine()
-    $proc.BeginErrorReadLine()
+
+    $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+    $stderrTask = $proc.StandardError.ReadToEndAsync()
+    $proc | Add-Member -NotePropertyName StdoutTask -NotePropertyValue $stdoutTask
+    $proc | Add-Member -NotePropertyName StderrTask -NotePropertyValue $stderrTask
     return $proc
+}
+
+function Wait-CappedProcess {
+    # Call once the caller is done polling / ready to block. Relays whatever
+    # the child wrote verbatim (no line-splitting, no encoding reinterpret
+    # beyond .NET's default stream decoding) and returns the exit code.
+    param($Proc)
+    $Proc.WaitForExit()
+    $out = $Proc.StdoutTask.GetAwaiter().GetResult()
+    $err = $Proc.StderrTask.GetAwaiter().GetResult()
+    if ($out) { [Console]::Out.Write($out) }
+    if ($err) { [Console]::Error.Write($err) }
+    return $Proc.ExitCode
 }
 
 function Invoke-Capped {
@@ -249,8 +261,7 @@ function Invoke-Capped {
 
             [Console]::Error.WriteLine("caproom: job object backend, limit=${LimitMb}m (committed memory, kernel-enforced, includes child processes)")
             $proc = New-CappedProcess -Exe $exe -Args $rest
-            $proc.WaitForExit()
-            exit $proc.ExitCode
+            exit (Wait-CappedProcess $proc)
         } catch {
             [Console]::Error.WriteLine("caproom: job object backend unavailable ($($_.Exception.Message)) -- falling back to watchdog")
         }
@@ -268,8 +279,7 @@ function Invoke-Capped {
         }
         Start-Sleep -Seconds $Interval
     }
-    $proc.WaitForExit()
-    exit $proc.ExitCode
+    exit (Wait-CappedProcess $proc)
 }
 
 # ---- argument parsing ----
