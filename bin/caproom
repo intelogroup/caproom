@@ -3,10 +3,12 @@
 # on macOS/Linux. macOS has no working RLIMIT_AS/DATA/RSS or launchd RSS
 # enforcement (verified empirically — both are no-ops on modern macOS), so
 # this uses whichever real enforcement mechanism is available:
-#   1. Docker cgroup (--memory) — hard cap, zero race window. Used when
-#      `docker` is installed and the daemon is running.
-#   2. Polling watchdog (ps RSS + SIGKILL) — fallback, no dependencies,
-#      works everywhere, has a small race window (poll interval).
+#   1. Host-native polling watchdog (process-tree RSS + SIGKILL) — the
+#      DEFAULT. Runs in your real environment: same PATH, auth, native
+#      binaries, tty. Small race window bounded by --interval.
+#   2. Docker cgroup (--memory) — opt-in via --docker. Hard cap, zero race
+#      window, but runs the command inside a Linux container (native-module
+#      and toolchain drift; see README). Fails loudly if the daemon is down.
 set -euo pipefail
 
 usage() {
@@ -22,14 +24,16 @@ usage: caproom [--limit <mb>] [--image <docker-image>] [--interval <sec>] -- <co
        caproom init <command> [--limit <mb>] [--grace <sec>]
 
   --limit <mb>     memory cap in MB (default: 4096)
-  --image <name>   docker image to run the command in, when using the docker
-                    backend (default: node:22-slim)
-  --interval <sec> watchdog poll interval in seconds, fallback backend only
-                    (default: 0.2)
+  --interval <sec> watchdog poll interval in seconds (default: 0.2)
   --grace <sec>    seconds to wait after SIGTERM before SIGKILL, watchdog
                     backend only (default: 5) — gives the process a chance
                     to flush/save state before a hard kill
-  --force-watchdog force the polling watchdog even if Docker is available
+  --docker         opt in to the Docker cgroup backend instead of the default
+                    host-native watchdog (needs the daemon running)
+  --image <name>   docker image used by the --docker backend
+                    (default: node:22-slim)
+  --force-watchdog no-op; the host-native watchdog IS the default — kept so
+                    existing scripts and 'init' snippets keep working
 
 park / wake — freeze an idle process so the kernel can reclaim/compress its
 memory without killing it. For a long-running agent sitting on stale
@@ -61,6 +65,7 @@ env vars (override flags): CAPROOM_LIMIT_MB, CAPROOM_IMAGE, CAPROOM_INTERVAL, CA
 examples:
   caproom --limit 2048 -- npm run build
   caproom --limit 512 -- claude --dangerously-skip-permissions -p "task"
+  caproom --limit 4096 --docker --image python:3.12-slim -- python train.py
   caproom park 12345
   caproom wake 12345
   caproom init claude --limit 6144 --grace 10
@@ -184,7 +189,7 @@ LIMIT_MB="${CAPROOM_LIMIT_MB:-4096}"
 IMAGE="${CAPROOM_IMAGE:-node:22-slim}"
 INTERVAL="${CAPROOM_INTERVAL:-0.2}"
 GRACE="${CAPROOM_GRACE:-5}"
-FORCE_WATCHDOG=0
+USE_DOCKER=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -192,7 +197,10 @@ while [[ $# -gt 0 ]]; do
     --image) IMAGE="$2"; shift 2 ;;
     --interval) INTERVAL="$2"; shift 2 ;;
     --grace) GRACE="$2"; shift 2 ;;
-    --force-watchdog) FORCE_WATCHDOG=1; shift ;;
+    --docker) USE_DOCKER=1; shift ;;
+    # legacy no-op: the watchdog IS the default now; accepted so old
+    # scripts and init snippets keep working
+    --force-watchdog) shift ;;
     --) shift; break ;;
     -h|--help) usage help ;;
     *) break ;;
@@ -200,10 +208,6 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ $# -eq 0 ]] && usage
-
-docker_available() {
-  [[ "$FORCE_WATCHDOG" -eq 0 ]] && command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1
-}
 
 run_docker() {
   echo "caproom: docker cgroup backend, limit=${LIMIT_MB}m image=${IMAGE}" >&2
@@ -248,7 +252,7 @@ sum_tree_rss_kb() {
 }
 
 run_watchdog() {
-  echo "caproom: watchdog backend (docker unavailable), limit=${LIMIT_MB}m poll=${INTERVAL}s (process-tree RSS)" >&2
+  echo "caproom: watchdog backend (host-native), limit=${LIMIT_MB}m poll=${INTERVAL}s (process-tree RSS)" >&2
   local limit_kb=$(( LIMIT_MB * 1024 ))
   "$@" &
   local pid=$!
@@ -279,8 +283,16 @@ run_watchdog() {
   exit "$exit_code"
 }
 
-if docker_available; then
-  run_docker "$@"
+if [[ "$USE_DOCKER" -eq 1 ]]; then
+  # Explicit opt-in must fail loudly rather than silently downgrade —
+  # the caller asked for a hard cap, a silent watchdog switch would
+  # quietly change the guarantee they asked for.
+  if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    run_docker "$@"
+  else
+    echo "caproom: --docker requested but the docker daemon is not reachable" >&2
+    exit 1
+  fi
 else
   run_watchdog "$@"
 fi
