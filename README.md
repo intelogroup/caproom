@@ -143,8 +143,9 @@ Docker backend is not wired up on Windows — the Job Object path already gives 
 
 - Docker backend mounts `$PWD` into the container at `/work` and runs there — paths outside `$PWD` aren't visible to the command.
 - Watchdog backends have a real (if small) race window; for a hard guarantee, use the Docker backend (POSIX) or the Job Object backend (Windows).
-- The watchdog's tree walk follows live parent→child edges. A child that *daemonizes* (double-fork, reparented to init/launchd) leaves the tree and escapes the cap — as does any process spawned after its parent chain broke. The Windows Job Object backend does not have this gap.
+- The watchdog's tree walk follows live parent→child edges. A child that *daemonizes* (double-fork, reparented to init/launchd) leaves the tree and escapes the cap — as does any process spawned after its parent chain broke. The Windows Job Object backend does not have this gap. This is a deliberate trade: caproom prefers to **miss** memory outside the tracked lineage rather than risk interfering with processes the user didn't ask it to manage.
 - On Windows, `Get-CimInstance` per poll makes the watchdog heavier than a plain RSS read; keep `--interval` at 0.2s or above there.
+- On Windows, the Job Object holds only the wrapped command and its descendants — never caproom itself — so the full `--limit` reaches your workload. (Cost: a millisecond-scale window after spawn before assignment lands, where the child is not yet counted.)
 
 ## Contributing
 
