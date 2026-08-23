@@ -222,6 +222,10 @@ jobs:
           }
           Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
           Write-Host "--- stderr ---"; Get-Content $errFile -ErrorAction SilentlyContinue | Select-Object -First 4
-          $first = (Get-Content $outFile -ErrorAction Stop | Select-Object -First 1) | ConvertFrom-Json
-          if ($first.event -ne 'started') { throw "first event: $($first.event)" }
-          Write-Host "watch-started-ok mode=$($first.mode) threshold_kb=$($first.threshold_kb)"
+          Write-Host "--- stdout ---";  Get-Content $outFile -ErrorAction SilentlyContinue
+          $line = Get-Content $outFile -ErrorAction SilentlyContinue |
+            Where-Object { $_ -match '"event":"started"' } | Select-Object -First 1
+          if (-not $line) { throw "no started event in watcher output" }
+          $first = $line | ConvertFrom-Json
+          if ($first.pids.Count -lt 1 -or [int]$first.pids[0] -eq 0) { throw "pids not parsed: $($first.pids -join ',')" }
+          Write-Host "watch-started-ok mode=$($first.mode) threshold_kb=$($first.threshold_kb) pid=$($first.pids[0])"
