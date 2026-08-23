@@ -94,6 +94,31 @@ caproom init claude --limit 6144 --grace 10 >> ~/.zshrc && source ~/.zshrc
 
 This appends a shell function that wraps `claude` through the watchdog backend (host-native — no Docker isolation, so the wrapped command keeps its normal filesystem/auth/PATH access) and an alias so plain `claude` picks it up. Per-shell override without editing the rc file: `CAPROOM_LIMIT_MB=8192 claude ...`. Works for any command, not just `claude` — `caproom init npm --limit 2048` wraps `npm` the same way.
 
+### `caproom top` — process-tree inventory for agents
+
+Read-only snapshot of every process tree you own, sorted by tree RSS. `--json` output is a **stable contract**: `schema` version field, additive changes only.
+
+```bash
+caproom top                       # human table
+caproom top --json                # machine output
+caproom top --json --pid 45057    # one subtree only
+caproom top --json --park-min-mb 1024   # park-candidate threshold (default 512MB)
+```
+
+```json
+{ "schema": 1, "ts": 1755950000, "limit_mb_default": 4096,
+  "processes": [
+    { "pid": 45057,
+      "cmd": "node /tmp/hog.mjs",
+      "tree_rss_kb": 455136,
+      "tree_pids": [45057, 45060],
+      "state": "running" | "parked" | "zombie",
+      "park_candidate": true,
+      "reason": "root sleeping + tree_rss 455136KB >= 524288KB park threshold" } ] }
+```
+
+One row per **tree root**; members are listed in `tree_pids`. `park_candidate` is a heuristic (`state == running`, root sleeping/idle, tree RSS ≥ threshold) with the rule spelled out in `reason` so the agent never re-derives it — override freely using the raw fields. The intended loop: poll `top --json` → decide → `park <pid>` / `wake <pid>`. Note `park` makes pages *eligible* for reclaim; see the caveat under park/wake below before treating it as freed RAM.
+
 ## park / wake — reclaim idle memory without killing
 
 Long-running agent sessions accumulate subprocesses that go idle but stay resident — old file watchers, finished tool-call children, stale servers. Killing them loses state; leaving them wastes RAM. `caproom park` freezes instead:
