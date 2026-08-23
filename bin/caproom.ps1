@@ -281,19 +281,19 @@ function Read-NewOutput {
 }
 
 function Wait-CappedProcess {
-    # Streams stdout/stderr LIVE by tail-following both temp files while the
-    # child runs (50ms cadence), then drains whatever landed last and returns
-    # the exit code. Call once the caller is done polling / ready to block.
-    param($Proc)
+    # Drains remaining output, cleans up the temp capture files, returns the
+    # exit code. If the caller streamed while polling (watchdog path), pass
+    # the SAME offsets table so only the unread tail is relayed here; the
+    # job-object path streams internally on a 50ms cadence.
+    param($Proc, $Offsets = @{ ($Proc.StdoutFile) = 0; ($Proc.StderrFile) = 0 })
     try {
-        $offsets = @{ ($Proc.StdoutFile) = 0; ($Proc.StderrFile) = 0 }
         while (-not $Proc.HasExited) {
-            Read-NewOutput -Path $Proc.StdoutFile -Offsets $offsets -Stream ([Console]::Out)
-            Read-NewOutput -Path $Proc.StderrFile -Offsets $offsets -Stream ([Console]::Error)
+            Read-NewOutput -Path $Proc.StdoutFile -Offsets $Offsets -Stream ([Console]::Out)
+            Read-NewOutput -Path $Proc.StderrFile -Offsets $Offsets -Stream ([Console]::Error)
             Start-Sleep -Milliseconds 50
         }
-        Read-NewOutput -Path $Proc.StdoutFile -Offsets $offsets -Stream ([Console]::Out)
-        Read-NewOutput -Path $Proc.StderrFile -Offsets $offsets -Stream ([Console]::Error)
+        Read-NewOutput -Path $Proc.StdoutFile -Offsets $Offsets -Stream ([Console]::Out)
+        Read-NewOutput -Path $Proc.StderrFile -Offsets $Offsets -Stream ([Console]::Error)
         return $Proc.ExitCode
     } finally {
         Remove-Item -LiteralPath $Proc.StdoutFile, $Proc.StderrFile -ErrorAction SilentlyContinue
@@ -376,7 +376,14 @@ function Invoke-Capped {
     [Console]::Error.WriteLine("caproom: watchdog backend, limit=${LimitMb}m poll=${Interval}s (process-tree working set, hard kill on breach -- Windows has no SIGTERM equivalent)")
     $limitBytes = [uint64]$LimitMb * 1MB
     $proc = New-CappedProcess -Exe $exe -ArgLine $rest
+    # Stream output WHILE the breach-poll loop runs -- polling must not sit
+    # on the whole runtime and leave the tail-follow to drain everything at
+    # exit. Same offsets table flows into Wait-CappedProcess for the final
+    # drain so nothing is relayed twice.
+    $offsets = @{ ($proc.StdoutFile) = 0; ($proc.StderrFile) = 0 }
     while (-not $proc.HasExited) {
+        Read-NewOutput -Path $proc.StdoutFile -Offsets $offsets -Stream ([Console]::Out)
+        Read-NewOutput -Path $proc.StderrFile -Offsets $offsets -Stream ([Console]::Error)
         Start-Sleep -Seconds $Interval
         if ($proc.HasExited) { break }
         $treeBytes = Get-TreeWorkingSetBytes -RootPid $proc.Id
@@ -386,7 +393,7 @@ function Invoke-Capped {
             exit 137
         }
     }
-    exit (Wait-CappedProcess $proc)
+    exit (Wait-CappedProcess $proc -Offsets $offsets)
 }
 
 # ---- argument parsing ----
