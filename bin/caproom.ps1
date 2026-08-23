@@ -112,6 +112,17 @@ public static class Caproom {
     public const int ExtendedLimitInformation = 9;
     public const uint LIMIT_PROCESS_MEMORY = 0x00000100;
     public const uint LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool SetHandleInformation(IntPtr hObject, uint dwMask, uint dwFlags);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr GetStdHandle(int nStdHandle);
+
+    public const int STD_INPUT_HANDLE = -10;
+    public const int STD_OUTPUT_HANDLE = -11;
+    public const int STD_ERROR_HANDLE = -12;
+    public const uint HANDLE_FLAG_INHERIT = 1;
 }
 '@
 
@@ -237,15 +248,26 @@ function New-CappedProcess {
     # pipe buffer), and by the time WaitForExit() returns the .Result is
     # already available synchronously.
     param([string]$Exe, [string]$Args)
-    # Resolve bare command names (e.g. "node") to a full path ourselves --
-    # PATH search under a redirected/no-console child was the last unverified
-    # link after ruling out StreamReader and Job Objects; an
-    # App-Execution-Alias stub earlier on PATH than the real interpreter
-    # would launch, exit 0, and write nothing, matching the symptom exactly.
     $resolvedExe = $Exe
     $cmd = Get-Command $Exe -ErrorAction SilentlyContinue
     if ($cmd) { $resolvedExe = $cmd.Source }
-    [Console]::Error.WriteLine("caproom: debug resolvedExe=[$resolvedExe] exists=$(Test-Path $resolvedExe) size=$((Get-Item $resolvedExe -ErrorAction SilentlyContinue).Length)")
+
+    # caproom.ps1 is itself a grandchild whose own stdout/stderr are an
+    # inherited pipe (Node's spawnSync stdio:'inherit', itself inherited from
+    # an outer `| Out-String` pipeline). Process.Start() always passes
+    # bInheritHandles=TRUE when any stream is redirected, so those inherited
+    # pipe handles get duplicated into every child we spawn alongside the
+    # fresh pipes .NET creates for capture -- the child can end up writing
+    # into the leaked duplicate instead, which reads back as a clean exit
+    # with zero captured bytes. Strip inheritability from our own std
+    # handles right before spawning so only the intended pipes propagate.
+    Import-Native
+    foreach ($h in @([Caproom]::STD_INPUT_HANDLE, [Caproom]::STD_OUTPUT_HANDLE, [Caproom]::STD_ERROR_HANDLE)) {
+        $handle = [Caproom]::GetStdHandle($h)
+        if ($handle -ne [IntPtr]::Zero -and $handle -ne [IntPtr]::new(-1)) {
+            [void][Caproom]::SetHandleInformation($handle, [Caproom]::HANDLE_FLAG_INHERIT, 0)
+        }
+    }
 
     $psi = New-Object Diagnostics.ProcessStartInfo
     $psi.FileName = $resolvedExe
