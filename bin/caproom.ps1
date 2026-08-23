@@ -176,29 +176,40 @@ function ConvertTo-ArgString {
     $quoted -join ' '
 }
 
-function Start-CappedProcess {
-    # Blocking start: -Wait alongside -PassThru, not a manual WaitForExit()
-    # afterwards. ExitCode on a -PassThru object read null even after
-    # WaitForExit() returned true for HasExited (confirmed via CI trace on
-    # windows-latest); -Wait blocks Start-Process itself until the process
-    # and its exit code are fully synced -- the documented-reliable combo.
-    # Used by the job-object path, which doesn't need to poll while running.
+function New-CappedProcess {
+    # Both Start-Process -NoNewWindow (console-handle inheritance) and a bare
+    # System.Diagnostics.Process with UseShellExecute=$false (no redirection
+    # at all) silently lost the child's stdout in CI: caproom is invoked as
+    # powershell.exe -File caproom.ps1 from the Node shim, itself invoked
+    # from a pwsh.EXE step that captures via a pipe (`| Out-String`) -- that
+    # nesting breaks console-handle inheritance. The only pattern that is
+    # reliable through an arbitrary number of process hops is explicit
+    # stream redirection with an async relay, so that's what this does:
+    # pipes are read and written through verbatim, not buffered or altered,
+    # preserving the "never touch what the wrapped process reads/writes"
+    # guarantee just as much as inherited handles would.
     param([string]$Exe, [string]$Args)
-    $spArgs = @{ FilePath = $Exe; PassThru = $true; NoNewWindow = $true; Wait = $true }
-    if ($Args) { $spArgs.ArgumentList = $Args }
-    return Start-Process @spArgs
-}
+    $psi = New-Object Diagnostics.ProcessStartInfo
+    $psi.FileName = $Exe
+    $psi.Arguments = $Args
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
 
-function Start-WatchedProcess {
-    # Non-blocking start, for the watchdog path -- it must poll WorkingSet64
-    # while the process runs, so it can't use -Wait. ExitCode is read only
-    # after HasExited, which is reliable for a -PassThru object once the
-    # process has actually exited (the race above was WaitForExit()-then-
-    # immediate-read, not exit-then-read).
-    param([string]$Exe, [string]$Args)
-    $spArgs = @{ FilePath = $Exe; PassThru = $true; NoNewWindow = $true }
-    if ($Args) { $spArgs.ArgumentList = $Args }
-    return Start-Process @spArgs
+    $proc = New-Object Diagnostics.Process
+    $proc.StartInfo = $psi
+    $proc.EnableRaisingEvents = $true
+    Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived -Action {
+        if ($null -ne $EventArgs.Data) { [Console]::Out.WriteLine($EventArgs.Data) }
+    } | Out-Null
+    Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived -Action {
+        if ($null -ne $EventArgs.Data) { [Console]::Error.WriteLine($EventArgs.Data) }
+    } | Out-Null
+
+    [void]$proc.Start()
+    $proc.BeginOutputReadLine()
+    $proc.BeginErrorReadLine()
+    return $proc
 }
 
 function Invoke-Capped {
@@ -237,7 +248,8 @@ function Invoke-Capped {
             }
 
             [Console]::Error.WriteLine("caproom: job object backend, limit=${LimitMb}m (committed memory, kernel-enforced, includes child processes)")
-            $proc = Start-CappedProcess -Exe $exe -Args $rest
+            $proc = New-CappedProcess -Exe $exe -Args $rest
+            $proc.WaitForExit()
             exit $proc.ExitCode
         } catch {
             [Console]::Error.WriteLine("caproom: job object backend unavailable ($($_.Exception.Message)) -- falling back to watchdog")
@@ -246,7 +258,7 @@ function Invoke-Capped {
 
     [Console]::Error.WriteLine("caproom: watchdog backend, limit=${LimitMb}m poll=${Interval}s (hard kill on breach -- Windows has no SIGTERM equivalent)")
     $limitBytes = [uint64]$LimitMb * 1MB
-    $proc = Start-WatchedProcess -Exe $exe -Args $rest
+    $proc = New-CappedProcess -Exe $exe -Args $rest
     while (-not $proc.HasExited) {
         $proc.Refresh()
         if (-not $proc.HasExited -and $proc.WorkingSet64 -gt $limitBytes) {
