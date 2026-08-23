@@ -231,14 +231,14 @@ function New-CappedProcess {
     # was the one capture method that survived an isolated repro under the
     # exact same nesting in the same CI job, so route through temp files
     # instead of pipes entirely.
-    param([string]$Exe, [string]$Args)
+    param([string]$Exe, [string]$ArgLine)
     $resolvedExe = $Exe
     $cmd = Get-Command $Exe -ErrorAction SilentlyContinue
     if ($cmd) { $resolvedExe = $cmd.Source }
 
     $outFile = [IO.Path]::GetTempFileName()
     $errFile = [IO.Path]::GetTempFileName()
-    $proc = Start-Process -FilePath $resolvedExe -ArgumentList $Args -NoNewWindow `
+    $proc = Start-Process -FilePath $resolvedExe -ArgumentList $ArgLine -NoNewWindow `
         -RedirectStandardOutput $outFile -RedirectStandardError $errFile -PassThru
 
     $proc | Add-Member -NotePropertyName StdoutFile -NotePropertyValue $outFile
@@ -296,7 +296,7 @@ function Invoke-Capped {
             }
 
             [Console]::Error.WriteLine("caproom: job object backend, limit=${LimitMb}m (committed memory, kernel-enforced, includes child processes)")
-            $proc = New-CappedProcess -Exe $exe -Args $rest
+            $proc = New-CappedProcess -Exe $exe -ArgLine $rest
             exit (Wait-CappedProcess $proc)
         } catch {
             [Console]::Error.WriteLine("caproom: job object backend unavailable ($($_.Exception.Message)) -- falling back to watchdog")
@@ -305,7 +305,7 @@ function Invoke-Capped {
 
     [Console]::Error.WriteLine("caproom: watchdog backend, limit=${LimitMb}m poll=${Interval}s (hard kill on breach -- Windows has no SIGTERM equivalent)")
     $limitBytes = [uint64]$LimitMb * 1MB
-    $proc = New-CappedProcess -Exe $exe -Args $rest
+    $proc = New-CappedProcess -Exe $exe -ArgLine $rest
     while (-not $proc.HasExited) {
         $proc.Refresh()
         if (-not $proc.HasExited -and $proc.WorkingSet64 -gt $limitBytes) {
