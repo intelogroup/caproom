@@ -73,7 +73,7 @@ caproom status <pid>    # pid, state (T = parked, S = running), RSS, elapsed
 
 Verified empirically on macOS: a parked process's RSS dropped ~90% (345MB → 37MB) once real memory pressure hit, and resumed correctly and stayed responsive after `SIGCONT`. No reclaim happens while the system is idle/unpressured — this rides the kernel's own compressor, it doesn't force anything.
 
-No daemon, no tracking file, no dependency — just `SIGSTOP`/`SIGCONT` wrapped with a friendly CLI. Any script or agent can call `caproom park <pid>` / `caproom wake <pid>` directly.
+No daemon, no tracking file, no dependency — just `SIGSTOP`/`SIGCONT` wrapped in a CLI. Any script or agent can call `caproom park <pid>` / `caproom wake <pid>` directly.
 
 **Caveat**: a parked process does zero work while stopped — no CPU, no I/O, no timers firing. Only park something actually idle (a background watcher, a finished subprocess kept around for reuse) — never park the process an agent is actively waiting on a response from, or you'll hang the agent, not save it memory.
 
