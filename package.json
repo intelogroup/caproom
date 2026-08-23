@@ -28,6 +28,9 @@
     "linux",
     "win32"
   ],
+  "scripts": {
+    "postinstall": "node -e \"process.stdout.write('caproom: optional next step — run `caproom setup` to bind headroom management to your shells (never modifies rc files on install)\\n')\""
+  },
   "license": "MIT",
   "repository": {
     "type": "git",

@@ -71,7 +71,11 @@ jobs:
         run: |
           sleep 30 &
           SP=$!
-          timeout 5 bin/caproom watch --threshold-mb 1000000 --interval 1 --json "$SP" > /tmp/watch.ndjson 2>/dev/null || true
+          bin/caproom watch --threshold-mb 1000000 --interval 1 --json "$SP" > /tmp/watch.ndjson 2>/dev/null &
+          WP=$!
+          sleep 4
+          kill "$WP" 2>/dev/null || true
+          wait "$WP" 2>/dev/null || true
           kill "$SP" 2>/dev/null || true
           head -1 /tmp/watch.ndjson | node -e '
             let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
@@ -107,6 +111,27 @@ jobs:
           node -e '
             const lines=require("fs").readFileSync("/tmp/mcprun.out","utf8").trim().split("\n").map(JSON.parse);
             const r=lines.find(m=>m.id===4).result.content[0].text;
-            if(!/KILLED BY CAP/.test(r)) { console.error(r); throw new Error("expected cap kill"); }
+            if(!/KILLED BY CAP|CAPPED — tree killed/.test(r)) { console.error(r); throw new Error("expected cap kill"); }
             console.log("run-cap-ok");
           '
+
+      - name: setup binds a fake HOME and unbind cleanly
+        run: |
+          export HOME=/tmp/crhome-ci
+          mkdir -p "$HOME"
+          bin/caproom setup > /dev/null
+          grep -q "# >>> caproom >>>" "$HOME/.zshrc"
+          bash -c 'source ~/.caproom/shell.sh && type caproom_headroom_check >/dev/null && echo shell-sh-ok'
+          bin/caproom setup --uninstall | grep -q "markers removed"
+          ! grep -q "# >>> caproom >>>" "$HOME/.zshrc"
+
+      - name: auto-wrap generates capped twins
+        run: |
+          export HOME=/tmp/crhome-ci
+          bash -c 'export CAPROOM_AUTO_WRAP="node"; source ~/.caproom/shell.sh; type node_capped >/dev/null && echo wrap-ok'
+
+      - name: freemem prints a percentage
+        run: |
+          PCT=$(bin/caproom freemem)
+          echo "free=${PCT}%"
+          case "$PCT" in ''|*[!0-9]*) echo "FAIL: not numeric"; exit 1;; esac
