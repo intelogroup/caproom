@@ -81,6 +81,8 @@ Opt in with `--docker`. The command then runs inside `node:22-slim` with `$PWD` 
 
 For capping an AI agent session you want to *interact* with, use the default watchdog: same host environment, streaming output, no container drift. Reach for `--docker` when you need the zero-race kernel guarantee and the command is container-safe.
 
+Orphan safety differs too. The watchdog TERMs the whole measured tree and SIGKILLs grace-period survivors from a breach-time snapshot — but a process that detaches before being observed escapes. Inside the Docker backend, the kernel's cgroup OOM handling acts on every task in the container: nothing outlives it, though the OOM killer picks victims by badness (it may kill your hog rather than the whole container — either way the capped workload ends and `caproom` exits non-zero). The Windows Job Object kills the whole job atomically on breach.
+
 
 ## init — auto-cap a command on every launch
 

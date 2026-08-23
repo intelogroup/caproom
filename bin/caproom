@@ -35,11 +35,12 @@ usage: caproom [--limit <mb>] [--image <docker-image>] [--interval <sec>] -- <co
   --force-watchdog no-op; the host-native watchdog IS the default — kept so
                     existing scripts and 'init' snippets keep working
 
-park / wake — freeze an idle process so the kernel can reclaim/compress its
-memory without killing it. For a long-running agent sitting on stale
-subprocesses: `caproom park <pid>` (SIGSTOP) instead of killing it. It stays
-alive, keeps its PID, keeps its state — just isn't scheduled and its memory
-becomes eligible for compression under system memory pressure. `caproom wake
+park / wake — freeze an idle process so the kernel CAN reclaim/compress its
+memory without killing it. Honest semantics: SIGSTOP only makes the pages
+eligible — the kernel reclaims them lazily, when real memory pressure hits.
+Park a 2GB agent on a quiet machine and it may stay ~2GB resident for hours.
+Park is insurance against OOM, not immediate RAM return; use it for processes
+too expensive to restart. `caproom park <pid>` (SIGSTOP), `caproom wake
 <pid>` (SIGCONT) brings it back instantly, same state, no restart needed.
 Any agent can call these directly — they're just SIGSTOP/SIGCONT, no daemon,
 no tracking file required.
@@ -102,7 +103,7 @@ cmd_park() {
   [[ -z "$pid" ]] && { echo "usage: caproom park <pid>" >&2; exit 1; }
   kill -0 "$pid" 2>/dev/null || { echo "caproom: no such pid $pid" >&2; exit 1; }
   kill -STOP "$pid"
-  echo "caproom: pid $pid parked (SIGSTOP) — memory now eligible for kernel reclaim under pressure. wake with: caproom wake $pid" >&2
+  echo "caproom: pid $pid parked (SIGSTOP) — pages now eligible for kernel reclaim, but the kernel acts only under real memory pressure; on a quiet machine RSS may not drop. wake with: caproom wake $pid" >&2
 }
 
 cmd_wake() {
@@ -262,7 +263,8 @@ run_watchdog() {
   while kill -0 "$pid" 2>/dev/null; do
     collect_tree "$pid"
     if [[ "${#TREE_PIDS[@]}" -gt 0 && "$TREE_RSS_KB" -gt "$limit_kb" ]]; then
-      echo "caproom: pid $pid tree RSS ${TREE_RSS_KB}KB exceeded ${limit_kb}KB cap — killing tree (grace ${GRACE}s)" >&2
+      local overshoot=$(( TREE_RSS_KB * 100 / limit_kb ))
+      echo "caproom: pid $pid tree RSS ${TREE_RSS_KB}KB exceeded ${limit_kb}KB cap (+${overshoot}%) — killing tree (grace ${GRACE}s)" >&2
       # Signal EVERY pid in the tree, not just the root: children that
       # survive a root-only TERM get orphaned and keep allocating past
       # the cap after caproom exits.
