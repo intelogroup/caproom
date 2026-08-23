@@ -15,10 +15,10 @@ macOS has no reliable way to cap a process's memory from userspace. A runaway pr
 caproom --limit <mb> -- <command> [args...]
 ```
 
-Two backends, auto-selected:
+Two backends:
 
-1. **Docker cgroup** (`--memory`) — used when Docker is installed and running. Hard cap, real kernel enforcement, zero race window.
-2. **Polling watchdog** (`ps` RSS + `SIGKILL`) — fallback when Docker isn't available. No dependencies, works anywhere `ps` exists. Measures the **whole process tree** each poll (agents keep their memory in children — MCP servers, bundler daemons, headless browsers — while the parent's own RSS stays flat). Has a small race window bounded by `--interval` (default 200ms) — memory can spike briefly past the cap between polls before the kill lands.
+1. **Host-native polling watchdog** (`ps` RSS + `SIGKILL`) — the **default** on macOS/Linux. Runs in your real environment: same PATH, auth, native binaries, tty. Measures the **whole process tree** each poll (agents keep their memory in children — MCP servers, bundler daemons, headless browsers — while the parent's own RSS stays flat). Has a small race window bounded by `--interval` (default 200ms).
+2. **Docker cgroup** (`--memory`) — opt-in with `--docker`. Hard cap, real kernel enforcement, zero race window — at the cost of running inside a Linux container (see caveats below). Fails loudly if the daemon isn't reachable rather than silently switching backends.
 
 ## Install
 
@@ -31,17 +31,14 @@ or clone and symlink `bin/caproom` onto your `PATH`.
 ## Usage
 
 ```bash
-# cap a build at 2GB
+# cap a build at 2GB (host-native watchdog, the default)
 caproom --limit 2048 -- npm run build
 
 # cap an AI coding agent run at 512MB
 caproom --limit 512 -- claude -p "refactor this module"
 
-# force the watchdog even if Docker is available
-caproom --limit 1024 --force-watchdog -- ./some-script.sh
-
-# use a different docker image for the docker backend (default: node:22-slim)
-caproom --limit 4096 --image python:3.12-slim -- python train.py
+# opt in to the Docker cgroup backend for a zero-race hard cap
+caproom --limit 4096 --docker --image python:3.12-slim -- python train.py
 ```
 
 ### Flags
@@ -49,10 +46,11 @@ caproom --limit 4096 --image python:3.12-slim -- python train.py
 | Flag | Default | Meaning |
 |---|---|---|
 | `--limit <mb>` | `4096` | memory cap in MB |
-| `--image <name>` | `node:22-slim` | docker image used by the docker backend |
 | `--interval <sec>` | `0.2` | watchdog poll interval |
 | `--grace <sec>` | `5` | seconds to wait after `SIGTERM` before `SIGKILL`, watchdog backend only — gives the process a chance to flush/save state before a hard kill |
-| `--force-watchdog` | off | use the polling watchdog even if Docker is available |
+| `--docker` | off | opt in to the Docker cgroup backend instead of the default host-native watchdog |
+| `--image <name>` | `node:22-slim` | docker image used by the `--docker` backend |
+| `--force-watchdog` | — | legacy no-op; the watchdog IS the default. Accepted so existing scripts and `init` snippets keep working |
 
 Env var overrides: `CAPROOM_LIMIT_MB`, `CAPROOM_IMAGE`, `CAPROOM_INTERVAL`, `CAPROOM_GRACE`.
 
@@ -60,7 +58,7 @@ On cap breach, the watchdog backend sends `SIGTERM` first and waits `--grace` se
 
 ## Backends compared
 
-The three enforcement mechanisms measure different quantities and cover children differently. Read this before reusing a `--limit` number across platforms or backends:
+The three enforcement mechanisms measure different quantities and cover children differently. Read this before reusing a `--limit` number across platforms or backends. The watchdog is the POSIX default; Docker is opt-in — caproom prefers to run your command unmodified in its real environment and *miss* an exotic memory spike over breaking a working workflow with container drift:
 
 | | Docker cgroup | Windows Job Object | Watchdog (POSIX) | Watchdog (Windows) |
 |---|---|---|---|---|
@@ -74,14 +72,14 @@ The three enforcement mechanisms measure different quantities and cover children
 
 ### Docker backend caveats
 
-The command runs inside `node:22-slim` with `$PWD` mounted at `/work` — it is a Linux container, not your host shell:
+Opt in with `--docker`. The command then runs inside `node:22-slim` with `$PWD` mounted at `/work` — a Linux container, not your host shell:
 
 - Native modules built for macOS (`esbuild`, `swc`, `sharp`) fail with exec-format errors inside the container.
 - Host toolchain, env vars, git credentials, and `~/.ssh` are not present.
 - The image pins Node 22 regardless of your project's version (`--image` to override).
 - No TTY is allocated, so interactive/TUI programs degrade; Docker Desktop's file-share layer slows large builds on macOS.
 
-For capping an AI agent session you want to *interact* with, prefer the watchdog (`--force-watchdog`): same host environment, streaming output, no container drift.
+For capping an AI agent session you want to *interact* with, use the default watchdog: same host environment, streaming output, no container drift. Reach for `--docker` when you need the zero-race kernel guarantee and the command is container-safe.
 
 
 ## init — auto-cap a command on every launch
@@ -142,7 +140,7 @@ Docker backend is not wired up on Windows — the Job Object path already gives 
 ## Limitations
 
 - Docker backend mounts `$PWD` into the container at `/work` and runs there — paths outside `$PWD` aren't visible to the command.
-- Watchdog backends have a real (if small) race window; for a hard guarantee, use the Docker backend (POSIX) or the Job Object backend (Windows).
+- Watchdog backends have a real (if small) race window; for a hard guarantee, opt into the Docker backend (`--docker`) on POSIX, or use the Job Object backend on Windows.
 - The watchdog's tree walk follows live parent→child edges. A child that *daemonizes* (double-fork, reparented to init/launchd) leaves the tree and escapes the cap — as does any process spawned after its parent chain broke. The Windows Job Object backend does not have this gap. This is a deliberate trade: caproom prefers to **miss** memory outside the tracked lineage rather than risk interfering with processes the user didn't ask it to manage.
 - On Windows, `Get-CimInstance` per poll makes the watchdog heavier than a plain RSS read; keep `--interval` at 0.2s or above there.
 - On Windows, the Job Object holds only the wrapped command and its descendants — never caproom itself — so the full `--limit` reaches your workload. (Cost: a millisecond-scale window after spawn before assignment lands, where the child is not yet counted.)
