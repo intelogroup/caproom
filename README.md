@@ -136,7 +136,26 @@ Verified empirically on macOS: a parked process's RSS dropped ~90% (345MB → 37
 
 No daemon, no tracking file, no dependency — just `SIGSTOP`/`SIGCONT` wrapped in a CLI. Any script or agent can call `caproom park <pid>` / `caproom wake <pid>` directly.
 
-**Caveat**: a parked process does zero work while stopped — no CPU, no I/O, no timers firing. Only park something actually idle (a background watcher, a finished subprocess kept around for reuse) — never park the process an agent is actively waiting on a response from, or you'll hang the agent, not save it memory.
+**Caveat**: a parked process does zero work while stopped — no CPU, no I/O, no timers firing. Only park something actually idle (a background watcher, a finished subprocess kept around for reuse) — never park the process an agent is actively waiting on a response from, or you'll hang the agent, not save it memory. Also: SIGSTOP only makes pages *eligible* for reclaim — the kernel compresses/evicts them lazily under real memory pressure. Park an idle 2GB agent on a quiet machine and it may stay ~2GB resident for hours. Park is insurance against OOM, not immediate RAM return.
+
+### `caproom top` / `caproom watch` — agent interface
+
+`caproom top --json` (above) is read-only discovery with a stable schema. `caproom watch` turns it into a daemon:
+
+```bash
+# observer: report tree-RSS breaches, touch nothing
+caproom watch --threshold-mb 2000 --json <pid>
+
+# arm auto-park: freeze breaching trees (SIGSTOP every pid in the snapshot)
+caproom watch --threshold-mb 2000 --auto-park --json <pid>
+
+# also restore automatically when system free memory recovers
+caproom watch --threshold-mb 2000 --auto-park --auto-wake-free-pct 15 <pid>
+```
+
+Naming the pid IS the per-process opt-in — there is no system-wide mode, since stopping an unchosen process risks freezing it mid-write. Events are NDJSON on stdout (`started`, `breach`/`parked`, `recovered`, `woke`, `all-exited`). Auto-park freezes the whole measured tree, tracks exactly what *it* stopped, never re-parks within one breach episode (woken trees stay awake unless RSS drops back under threshold), and `--auto-wake-free-pct` undoes only watch's own parks.
+
+Typical loop: `top --json` finds candidates → `watch --auto-park` babysits them during heavy builds → explicit or automatic wake restores them after.
 
 ## What it never touches
 
