@@ -209,7 +209,14 @@ jobs:
             & caproom watch --json --threshold-mb 1000000 --interval 1 -- $targetPid 2>$null
           }
           if (Wait-Job $job -Timeout 30) { $out = Receive-Job $job }
-          else { Stop-Job $job; throw "watcher did not exit within 30s" }
+          else {
+            Write-Host "TIMEOUT — job output so far:"
+            Receive-Job $job -Keep 2>&1 | ForEach-Object { Write-Host "JOB| $_" }
+            Stop-Job $job
+            Get-Process | Where-Object { $_.ProcessName -match 'node|powershell' } |
+              Select-Object Id,ProcessName,StartTime | Format-Table | Out-String | Write-Host
+            throw "watcher did not exit within 30s"
+          }
           Remove-Job $job -Force -ErrorAction SilentlyContinue
           Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
           $ev = ($out | Select-Object -First 1) | ConvertFrom-Json
