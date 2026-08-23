@@ -646,8 +646,7 @@ cmd_setup() {
     while IFS=$'\t' read -r rc _req; do
       [[ -f "$rc" ]] || continue
       if grep -q "# >>> caproom >>>" "$rc"; then
-        sed -i.bak.$$ '/^# >>> caproom >>>$/,/^# <<< caproom <<<$/{/^# >>> caproom >>>$/d;/^# <<< caproom <<<$/{x;s/^$/removed/;x};d}' "$rc" 2>/dev/null \
-          || awk '/^# >>> caproom >>>$/{skip=1;next} /^# <<< caproom <<<$/{skip=0;next} !skip' "$rc" > "$rc.tmp" && mv "$rc.tmp" "$rc"
+        awk '/^# >>> caproom >>>$/{skip=1;next} /^# <<< caproom <<<$/{skip=0;next} !skip' "$rc" > "$rc.cr.tmp" && mv "$rc.cr.tmp" "$rc"
         removed=$(( removed + 1 ))
       fi
     done < <(rc_targets)
