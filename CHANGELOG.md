@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.6.0 — 2026-08-23
+
+### Added
+- `caproom watch` — RSS-threshold daemon on explicit pids: observer mode reports breaches; gated `--auto-park` freezes whole breaching trees (SIGSTOP every pid in the snapshot, one park per breach episode); `--auto-wake-free-pct N` restores its own parks when system free memory recovers. NDJSON events on stdout (`schema:1`).
+- `caproom-mcp` — zero-dependency MCP server (stdio) exposing `top`, `park`, `wake`, `watch_start`/`watch_events`/`watch_stop`, and `run` as native agent tools. Same gates as the CLI: explicit pids only, auto-park opt-in per watcher.
+- `caproom setup` / `bind` — terminal-agnostic shell integration: writes `~/.caproom/shell.{sh,fish}` (and `shell.ps1` on Windows, patching `$PROFILE`) and marker-patches your rc files (timestamped backups, idempotent, reversible). Headroom warning on every prompt via precmd/PROMPT_COMMAND/fish_prompt/prompt hooks — throttled, threshold via `CAPROOM_HEADROOM_WARN`. Opt-in auto-wrap: `CAPROOM_AUTO_WRAP=claude,codex` creates `<cmd>_capped` twins under `$CAPROOM_LIMIT_MB`; bare-name shadowing requires explicit `CAPROOM_AUTO_ALIAS=1`.
+- `caproom setup --guard --threshold N` — installs a login daemon (LaunchAgent plist on macOS, systemd user unit on Linux) running `caproom guard` across all terminals.
+- `caproom freemem` — prints free-memory percentage (backs the shell hooks).
+- POSIX CI workflow (ubuntu + macOS matrix): syntax checks, single/tree/stubborn kill regressions with zero-orphan assertions, `top --json` schema validation, watch observer safety (must not park un-armed pids), MCP handshake and an end-to-end capped run through the MCP server.
+
+### Fixed
+- MCP `run` verdict now recognizes SIGTERM-honoring tree kills as CAPPED (exit 143 with a breach line), not a plain termination.
+
 ## 0.5.0 — 2026-08-23
 
 ### Breaking
@@ -13,8 +26,6 @@
 
 ### Added
 - `caproom top` / `caproom top --json` — read-only process-tree inventory for agents. One row per tree root with `tree_rss_kb`, `tree_pids` (blast radius), `state`, and `park_candidate` + `reason`. JSON contract pinned via `"schema":1`, additive changes only.
-- `caproom watch` — RSS-threshold daemon on explicit pids: observer mode, gated `--auto-park` (freezes whole breaching trees, one park per breach episode), `--auto-wake-free-pct N` restores its own parks when pressure clears. NDJSON events on stdout.
-- `caproom-mcp` — zero-dependency MCP server (stdio) exposing top/park/wake/watch/run as native agent tools. Same gates as the CLI.
 - `test/stubborn-hog.js` — regression fixture for TERM-ignoring children.
 
 ### Docs
