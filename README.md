@@ -27,7 +27,7 @@ Both are honest about their mechanism: neither claims kernel-enforced rlimit, be
 ## Install
 
 ```
-npm install -g aicap
+npm install -g @forgememo-cli/aicap
 ```
 
 or clone and symlink `bin/aicap` onto your `PATH`.
