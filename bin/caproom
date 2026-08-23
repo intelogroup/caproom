@@ -216,15 +216,17 @@ run_docker() {
     -v "$PWD:/work" -w /work "$IMAGE" "$@"
 }
 
-sum_tree_rss_kb() {
-  # Sum RSS across the whole descendant tree of $1. Agents keep their memory
-  # in children (MCP servers, bundler daemons, headless browsers) while the
-  # parent's own RSS stays flat — a top-pid-only check never fires on them.
-  # One ps snapshot per poll; BFS over pid->ppid edges. Plain indexed arrays
-  # only (no declare -A) so macOS's stock bash 3.2 works.
+collect_tree() {
+  # BFS over the descendant tree of $1, filling globals TREE_PIDS and
+  # TREE_RSS_KB. Agents keep their memory in children (MCP servers, bundler
+  # daemons, headless browsers) while the parent's own RSS stays flat — a
+  # top-pid-only check never fires on them. One ps snapshot per poll; plain
+  # indexed arrays only (no declare -A) so macOS's stock bash 3.2 works.
   local root="$1"
   local -a pids=() ppids=() kb=() queue=()
-  local pid ppid k total=0 cur i j
+  local pid ppid k cur i j
+  TREE_PIDS=()
+  TREE_RSS_KB=0
   while read -r pid ppid k; do
     [[ -n "$pid" ]] || continue
     pids+=("$pid"); ppids+=("$ppid"); kb+=("$k")
@@ -236,7 +238,8 @@ sum_tree_rss_kb() {
     if [[ ${#queue[@]} -gt 1 ]]; then queue=("${queue[@]:1}"); else queue=(); fi
     for ((i = 0; i < ${#pids[@]}; i++)); do
       if [[ "${pids[$i]}" == "$cur" && -n "${kb[$i]}" ]]; then
-        total=$(( total + kb[$i] ))
+        TREE_PIDS+=("$cur")
+        TREE_RSS_KB=$(( TREE_RSS_KB + kb[$i] ))
         kb[$i]=""
         for ((j = 0; j < ${#ppids[@]}; j++)); do
           if [[ "${ppids[$j]}" == "$cur" ]]; then
@@ -248,7 +251,6 @@ sum_tree_rss_kb() {
       fi
     done
   done
-  echo "$total"
 }
 
 run_watchdog() {
@@ -258,19 +260,34 @@ run_watchdog() {
   local pid=$!
   local exit_code=0
   while kill -0 "$pid" 2>/dev/null; do
-    local tree_kb
-    tree_kb=$(sum_tree_rss_kb "$pid")
-    if [[ -n "$tree_kb" && "$tree_kb" -gt "$limit_kb" ]]; then
-      echo "caproom: pid $pid tree RSS ${tree_kb}KB exceeded ${limit_kb}KB cap — sending SIGTERM (grace ${GRACE}s)" >&2
-      kill -TERM "$pid" 2>/dev/null || true
+    collect_tree "$pid"
+    if [[ "${#TREE_PIDS[@]}" -gt 0 && "$TREE_RSS_KB" -gt "$limit_kb" ]]; then
+      echo "caproom: pid $pid tree RSS ${TREE_RSS_KB}KB exceeded ${limit_kb}KB cap — killing tree (grace ${GRACE}s)" >&2
+      # Signal EVERY pid in the tree, not just the root: children that
+      # survive a root-only TERM get orphaned and keep allocating past
+      # the cap after caproom exits.
+      kill -TERM "${TREE_PIDS[@]}" 2>/dev/null || true
+      local -a breach_pids=("${TREE_PIDS[@]}")
       local waited=0
       while kill -0 "$pid" 2>/dev/null && [[ "$waited" -lt "$GRACE" ]]; do
         sleep 1
         waited=$(( waited + 1 ))
       done
-      if kill -0 "$pid" 2>/dev/null; then
-        echo "caproom: pid $pid still alive after ${GRACE}s grace — SIGKILL" >&2
-        kill -9 "$pid" 2>/dev/null || true
+      # Escalate against anything that ignored TERM — root OR child.
+      # Scanning the breach-time snapshot (not re-walking from the root)
+      # also catches the case where the root died but a stubborn child
+      # survived it. Children spawned DURING the grace window are not in
+      # the snapshot; same accepted gap as detached daemons generally.
+      local sp sweep=0
+      for sp in "${breach_pids[@]}"; do
+        if kill -0 "$sp" 2>/dev/null; then
+          kill -9 "$sp" 2>/dev/null || true
+          sweep=$(( sweep + 1 ))
+        fi
+      done
+      if [[ "$sweep" -gt 0 ]]; then
+        echo "caproom: SIGKILLed ${sweep} survivor(s) after grace — exit 137" >&2
+        wait "$pid" 2>/dev/null || true
         exit 137
       fi
       wait "$pid" 2>/dev/null || exit_code=$?
