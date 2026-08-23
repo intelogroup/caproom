@@ -18,9 +18,12 @@ usage: caproom [--limit <mb>] [--image <docker-image>] [--interval <sec>] -- <co
                     backend (default: node:22-slim)
   --interval <sec> watchdog poll interval in seconds, fallback backend only
                     (default: 0.2)
+  --grace <sec>    seconds to wait after SIGTERM before SIGKILL, watchdog
+                    backend only (default: 5) — gives the process a chance
+                    to flush/save state before a hard kill
   --force-watchdog force the polling watchdog even if Docker is available
 
-env vars (override flags): CAPROOM_LIMIT_MB, CAPROOM_IMAGE, CAPROOM_INTERVAL
+env vars (override flags): CAPROOM_LIMIT_MB, CAPROOM_IMAGE, CAPROOM_INTERVAL, CAPROOM_GRACE
 
 examples:
   caproom --limit 2048 -- npm run build
@@ -32,6 +35,7 @@ EOF
 LIMIT_MB="${CAPROOM_LIMIT_MB:-4096}"
 IMAGE="${CAPROOM_IMAGE:-node:22-slim}"
 INTERVAL="${CAPROOM_INTERVAL:-0.2}"
+GRACE="${CAPROOM_GRACE:-5}"
 FORCE_WATCHDOG=0
 
 while [[ $# -gt 0 ]]; do
@@ -39,6 +43,7 @@ while [[ $# -gt 0 ]]; do
     --limit) LIMIT_MB="$2"; shift 2 ;;
     --image) IMAGE="$2"; shift 2 ;;
     --interval) INTERVAL="$2"; shift 2 ;;
+    --grace) GRACE="$2"; shift 2 ;;
     --force-watchdog) FORCE_WATCHDOG=1; shift ;;
     --) shift; break ;;
     -h|--help) usage ;;
@@ -69,9 +74,21 @@ run_watchdog() {
     local rss_kb
     rss_kb=$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ')
     if [[ -n "$rss_kb" && "$rss_kb" -gt "$limit_kb" ]]; then
-      echo "caproom: pid $pid RSS ${rss_kb}KB exceeded ${limit_kb}KB cap — killing" >&2
-      kill -9 "$pid" 2>/dev/null || true
-      exit 137
+      echo "caproom: pid $pid RSS ${rss_kb}KB exceeded ${limit_kb}KB cap — sending SIGTERM (grace ${GRACE}s)" >&2
+      kill -TERM "$pid" 2>/dev/null || true
+      local waited=0
+      while kill -0 "$pid" 2>/dev/null && [[ "$waited" -lt "$GRACE" ]]; do
+        sleep 1
+        waited=$(( waited + 1 ))
+      done
+      if kill -0 "$pid" 2>/dev/null; then
+        echo "caproom: pid $pid still alive after ${GRACE}s grace — SIGKILL" >&2
+        kill -9 "$pid" 2>/dev/null || true
+        exit 137
+      fi
+      wait "$pid" 2>/dev/null || exit_code=$?
+      echo "caproom: pid $pid exited cleanly (code $exit_code) during grace period" >&2
+      exit "$exit_code"
     fi
     sleep "$INTERVAL"
   done

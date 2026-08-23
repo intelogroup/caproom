@@ -48,9 +48,9 @@ caproom --limit 1024 --force-watchdog -- ./some-script.sh
 caproom --limit 4096 --image python:3.12-slim -- python train.py
 ```
 
-Env var overrides: `CAPROOM_LIMIT_MB`, `CAPROOM_IMAGE`, `CAPROOM_INTERVAL`.
+Env var overrides: `CAPROOM_LIMIT_MB`, `CAPROOM_IMAGE`, `CAPROOM_INTERVAL`, `CAPROOM_GRACE`.
 
-On cap breach, `caproom` kills the process and exits `137` (same convention as Docker's own OOM-kill exit code).
+On cap breach, the watchdog backend sends `SIGTERM` first and waits `--grace` seconds (default 5) before `SIGKILL` — gives a process a chance to flush/save state (useful for long-running agents, not just disposable scripts). If the process exits cleanly during the grace window, `caproom` propagates its real exit code; only a hard `SIGKILL` (process ignored `SIGTERM` or grace ran out) reports `137` (same convention as Docker's own OOM-kill exit code, which the docker backend always uses on breach since Docker itself sends the kill).
 
 ## Limitations
 
