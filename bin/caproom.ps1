@@ -216,8 +216,8 @@ function Invoke-Capped {
             [Console]::Error.WriteLine("caproom: job object backend, limit=${LimitMb}m (committed memory, kernel-enforced, includes child processes)")
             $proc = Start-Process @startArgs
             $proc.WaitForExit()
+            $proc.Refresh()
             $code = $proc.ExitCode
-            [Console]::Error.WriteLine("caproom: debug child ExitCode=[$code] HasExited=[$($proc.HasExited)]")
             if ($null -eq $code) { $code = 1 }
             exit $code
         } catch {
@@ -237,7 +237,10 @@ function Invoke-Capped {
         }
         Start-Sleep -Seconds $Interval
     }
-    exit $proc.ExitCode
+    $proc.Refresh()
+    $code = $proc.ExitCode
+    if ($null -eq $code) { $code = 1 }
+    exit $code
 }
 
 # ---- argument parsing ----

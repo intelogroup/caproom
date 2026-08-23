@@ -18,7 +18,4 @@ if (result.error) {
   console.error(`caproom: failed to launch backend — ${result.error.message}`);
   process.exit(1);
 }
-if (process.env.CAPROOM_DEBUG) {
-  console.error(`caproom: debug spawnSync status=[${result.status}] signal=[${result.signal}]`);
-}
 process.exit(result.status === null ? 1 : result.status);
