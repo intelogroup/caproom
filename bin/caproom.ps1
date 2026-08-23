@@ -177,28 +177,35 @@ function ConvertTo-ArgString {
 }
 
 function Start-CappedProcess {
+    # Blocking start: -Wait alongside -PassThru, not a manual WaitForExit()
+    # afterwards. ExitCode on a -PassThru object read null even after
+    # WaitForExit() returned true for HasExited (confirmed via CI trace on
+    # windows-latest); -Wait blocks Start-Process itself until the process
+    # and its exit code are fully synced -- the documented-reliable combo.
+    # Used by the job-object path, which doesn't need to poll while running.
     param([string]$Exe, [string]$Args)
     $spArgs = @{ FilePath = $Exe; PassThru = $true; NoNewWindow = $true; Wait = $true }
     if ($Args) { $spArgs.ArgumentList = $Args }
-    # -Wait alongside -PassThru, not a manual WaitForExit() afterwards: the
-    # ExitCode on a -PassThru object read null even after WaitForExit()
-    # returned true for HasExited (confirmed via CI trace on windows-latest).
-    # -Wait blocks Start-Process itself until the process and its exit code
-    # are fully synced, which is the documented-reliable combination.
     return Start-Process @spArgs
+}
+
+function Start-WatchedProcess {
+    # Non-blocking start, for the watchdog path -- it must poll WorkingSet64
+    # while the process runs, so it can't use -Wait. ExitCode is read only
+    # after HasExited, which is reliable for a -PassThru object once the
+    # process has actually exited (the race above was WaitForExit()-then-
+    # immediate-read, not exit-then-read).
+    param([string]$Exe, [string]$Args)
+    $spArgs = @{ FilePath = $Exe; PassThru = $true; NoNewWindow = $true }
+    if ($Args) { $spArgs.ArgumentList = $Args }
+    return Start-Process @spArgs
+}
 
 function Invoke-Capped {
     param([int]$LimitMb, [double]$Interval, [bool]$ForceWatchdog, [string[]]$Command)
 
     $exe = $Command[0]
     $rest = if ($Command.Length -gt 1) { ConvertTo-ArgString $Command[1..($Command.Length - 1)] } else { '' }
-
-    # Raw System.Diagnostics.Process instead of Start-Process -PassThru: the
-    # PassThru process object's ExitCode read null even after WaitForExit()
-    # returned and HasExited was true (confirmed via CI trace), and Refresh()
-    # before reading it made things worse (read back a bogus nonzero code) --
-    # a handle-lifetime quirk specific to the Start-Process cmdlet wrapper.
-    # Driving Process directly is the documented-reliable pattern.
 
     if (-not $ForceWatchdog) {
         try {
@@ -230,8 +237,7 @@ function Invoke-Capped {
             }
 
             [Console]::Error.WriteLine("caproom: job object backend, limit=${LimitMb}m (committed memory, kernel-enforced, includes child processes)")
-            $proc = New-CappedProcess -Exe $exe -Args $rest
-            $proc.WaitForExit()
+            $proc = Start-CappedProcess -Exe $exe -Args $rest
             exit $proc.ExitCode
         } catch {
             [Console]::Error.WriteLine("caproom: job object backend unavailable ($($_.Exception.Message)) -- falling back to watchdog")
@@ -240,7 +246,7 @@ function Invoke-Capped {
 
     [Console]::Error.WriteLine("caproom: watchdog backend, limit=${LimitMb}m poll=${Interval}s (hard kill on breach -- Windows has no SIGTERM equivalent)")
     $limitBytes = [uint64]$LimitMb * 1MB
-    $proc = New-CappedProcess -Exe $exe -Args $rest
+    $proc = Start-WatchedProcess -Exe $exe -Args $rest
     while (-not $proc.HasExited) {
         $proc.Refresh()
         if (-not $proc.HasExited -and $proc.WorkingSet64 -gt $limitBytes) {
