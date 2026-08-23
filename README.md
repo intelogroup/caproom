@@ -94,6 +94,24 @@ caproom init claude --limit 6144 --grace 10 >> ~/.zshrc && source ~/.zshrc
 
 This appends a shell function that wraps `claude` through the watchdog backend (host-native — no Docker isolation, so the wrapped command keeps its normal filesystem/auth/PATH access) and an alias so plain `claude` picks it up. Per-shell override without editing the rc file: `CAPROOM_LIMIT_MB=8192 claude ...`. Works for any command, not just `claude` — `caproom init npm --limit 2048` wraps `npm` the same way.
 
+## setup / bind — shell integration for every terminal
+
+`caproom setup` binds headroom management to your shells at the **shell layer**, so it works in any terminal (Terminal.app, iTerm2, Ghostty, Windows Terminal) without touching terminal-specific config:
+
+```bash
+caproom setup                # bind zsh/bash + fish (Windows: PowerShell $PROFILE)
+caproom setup --uninstall    # remove rc markers; backups and integration files stay
+```
+
+What it does:
+
+- Writes one integration file per shell under `~/.caproom/` (`shell.sh`, `shell.fish`, `shell.ps1`) and adds a 3-line marker block (`# >>> caproom >>>`) to your rc files. Idempotent; timestamped `.bak` backups are made before first patch.
+- Adds a **headroom warning on every prompt** — once per minute, only when free memory drops below `CAPROOM_HEADROOM_WARN` percent (default 20). Never blocks, never modifies your prompt text.
+- Optional **auto-wrap**: `export CAPROOM_AUTO_WRAP="claude,codex,opencode"` in your rc creates `<cmd>_capped` twins that run through the watchdog with `CAPROOM_LIMIT_MB`. Bare command names are shadowed **only** if you also set `CAPROOM_AUTO_ALIAS=1` — caproom never hijacks an unwrapped command by default.
+- Optional login daemon: `caproom setup --guard --threshold 15` installs a LaunchAgent (macOS) or systemd user unit (Linux) running `caproom guard` across all terminals.
+
+npm install never touches your rc files — postinstall prints a hint, binding is always explicit. Undo any time: `caproom setup --uninstall`.
+
 ### `caproom top` — process-tree inventory for agents
 
 Read-only snapshot of every process tree you own, sorted by tree RSS. `--json` output is a **stable contract**: `schema` version field, additive changes only.
