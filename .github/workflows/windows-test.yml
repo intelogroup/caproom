@@ -162,16 +162,27 @@ jobs:
           if ($log -notmatch 'killing tree') { throw "breach was not attributed to the tree walk" }
           exit 0
 
-      # MARK-A prints immediately, MARK-B three seconds later. If output were
-      # relayed only at exit both arrivals would be identical; streaming must
-      # show a ~3s gap.
+      # MARK-A prints immediately, MARK-B three seconds later (test/mark.js).
+      # Read caproom's stdout through a raw .NET StreamReader rather than a
+      # pwsh pipeline: the reader unblocks per line as bytes land, so arrival
+      # timestamps measure CAPOOM's streaming, not PowerShell's own pipe
+      # handling. Live tail-follow must show a ~3s gap; relay-at-exit shows ~0.
       - name: watchdog streams output before the child exits
         shell: pwsh
         run: |
+          $psi = New-Object Diagnostics.ProcessStartInfo
+          $psi.FileName = "$env:ComSpec"
+          $psi.Arguments = '/d /s /c "caproom --limit 512 --force-watchdog -- node test/mark.js"'
+          $psi.UseShellExecute = $false
+          $psi.RedirectStandardOutput = $true
+          $p = New-Object Diagnostics.Process
+          $p.StartInfo = $psi
+          [void]$p.Start()
           $arrivals = @{}
-          & caproom --limit 512 --force-watchdog -- node -e "console.log('MARK-A'); setTimeout(function(){console.log('MARK-B');},3000);" 2>$null | ForEach-Object {
-            if ($_ -match 'MARK-([AB])') { $arrivals[$Matches[1]] = [DateTime]::Now }
+          while ($null -ne ($line = $p.StandardOutput.ReadLine())) {
+            if ($line -match 'MARK-([AB])') { $arrivals[$Matches[1]] = [DateTime]::Now; Write-Host "arrival $($Matches[1]): $($arrivals[$Matches[1]].ToString('HH:mm:ss.fff'))" }
           }
+          $p.WaitForExit()
           if (-not $arrivals['A'] -or -not $arrivals['B']) { throw "markers not observed: $($arrivals.Keys -join ',')" }
           $gap = ($arrivals['B'] - $arrivals['A']).TotalMilliseconds
           Write-Host "MARK-A -> MARK-B gap: ${gap}ms"
