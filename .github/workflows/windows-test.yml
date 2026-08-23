@@ -1,0 +1,72 @@
+name: windows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Parse check
+        shell: pwsh
+        run: |
+          $errs = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            "bin/caproom.ps1", [ref]$null, [ref]$errs) | Out-Null
+          if ($errs) { $errs | ForEach-Object { Write-Error $_ }; exit 1 }
+
+      - name: Install globally
+        run: npm install -g .
+
+      - name: help exits 0
+        shell: pwsh
+        run: |
+          caproom --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "help exit $LASTEXITCODE" }
+
+      - name: no args exits 1
+        shell: pwsh
+        run: |
+          caproom 2>$null | Out-Null
+          if ($LASTEXITCODE -ne 1) { throw "expected exit 1, got $LASTEXITCODE" }
+
+      - name: init emits a function
+        shell: pwsh
+        run: |
+          $out = caproom init claude --limit 6144 | Out-String
+          if ($out -notmatch 'function claude_capped') { throw "init output wrong:`n$out" }
+
+      - name: cap actually enforces
+        shell: pwsh
+        run: |
+          $script = 'const a=[];for(;;){a.push(Buffer.alloc(10*1024*1024));}'
+          $log = caproom --limit 256 -- node -e $script 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $log
+          if ($code -eq 0) { throw "1GB allocation under a 256MB cap exited 0 — cap did not enforce" }
+          if ($log -notmatch 'job object backend') {
+            throw "fell back to the polling watchdog — the Job Object path did not fire"
+          }
+
+      - name: park trims the working set
+        shell: pwsh
+        run: |
+          $p = Start-Process node -ArgumentList '-e', 'const a=[];for(let i=0;i<40;i++)a.push(Buffer.alloc(10*1024*1024).fill(1));setTimeout(()=>{},60000)' -PassThru
+          Start-Sleep -Seconds 5
+          $p.Refresh(); $before = $p.WorkingSet64
+          caproom park $p.Id
+          if ($LASTEXITCODE -ne 0) { throw "park exit $LASTEXITCODE" }
+          Start-Sleep -Seconds 2
+          $p.Refresh(); $after = $p.WorkingSet64
+          Write-Host "working set $([math]::Round($before/1MB))MB -> $([math]::Round($after/1MB))MB"
+          if ($after -ge $before) { throw "EmptyWorkingSet did not reduce the working set" }
+          if ($p.HasExited) { throw "park killed the process — it must keep running" }
+          Stop-Process -Id $p.Id -Force

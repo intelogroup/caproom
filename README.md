@@ -3,7 +3,7 @@
 [![npm](https://img.shields.io/npm/v/caproom.svg)](https://www.npmjs.com/package/caproom)
 [![license](https://img.shields.io/npm/l/caproom.svg)](LICENSE)
 
-Prevent RAM OOM for long-running terminal coding agents, builds, and background jobs — memory caps plus idle-process parking, for macOS/Linux.
+Prevent RAM OOM for long-running terminal coding agents, builds, and background jobs — memory caps plus idle-process parking, for macOS, Linux, and Windows.
 
 ## Why
 
@@ -91,11 +91,31 @@ No daemon, no tracking file, no dependency — just `SIGSTOP`/`SIGCONT` wrapped 
 
 caproom only watches OS-level RSS and sends signals (`SIGTERM`/`SIGKILL`/`SIGSTOP`/`SIGCONT`). The watchdog backend runs the wrapped command as a direct child with stdin/stdout/stderr passed straight through — no pipe, no buffering, no interception. The Docker backend passes stdio through the same way (`docker run -i`). caproom never reads, modifies, or truncates anything the wrapped process reads or writes — including an AI agent's own conversation/context stream. It manages RAM headroom only, nothing else.
 
+## Windows
+
+Windows uses a separate PowerShell backend, selected automatically. Same commands, but the semantics differ in three ways worth knowing before you reuse a `--limit` number across platforms.
+
+**The cap is a Job Object** (`JOB_OBJECT_LIMIT_PROCESS_MEMORY`), enforced by the kernel at allocation time. Two things it does better than the POSIX watchdog: there is no poll-interval race window, and child processes are covered automatically — a process associated with a job passes that association to anything it spawns, so the whole tree is capped, not just the direct child.
+
+**`--limit` means committed memory on Windows, RSS on macOS/Linux.** These are different quantities. The same number will bite at a different point, so tune it per platform rather than assuming it transfers.
+
+**No grace period.** Windows console apps have no `SIGTERM` equivalent. Under the Job Object backend nothing is killed at all — the allocation just fails inside the process. Under the watchdog fallback, `Stop-Process` is a hard kill with no chance to flush state. `--grace` is accepted and ignored.
+
+**`park` does not suspend on Windows.** It calls `EmptyWorkingSet`, which trims the process's working set to the pagefile immediately and on demand — no waiting for system memory pressure, and **the process keeps running**. The macOS caveat about never parking a process an agent is waiting on does not apply here. `caproom wake` is therefore a no-op on Windows; trimmed pages fault back in on next access.
+
+`init` emits a PowerShell function plus `Set-Alias` for your `$PROFILE`:
+
+```powershell
+caproom init claude --limit 6144 >> $PROFILE
+```
+
+Docker backend is not wired up on Windows — the Job Object path already gives kernel enforcement, so there is nothing for it to add.
+
 ## Limitations
 
 - Docker backend mounts `$PWD` into the container at `/work` and runs there — paths outside `$PWD` aren't visible to the command.
 - Watchdog backend has a real (if small) race window; for a hard guarantee, use the Docker backend.
-- Neither backend can cap a process that immediately forks and hides children under a different watched PID tree in unusual ways — the watchdog only tracks the direct child.
+- On macOS/Linux the watchdog only tracks the direct child, so a process that forks and hides work under a separate PID tree escapes the cap. The Windows Job Object backend does not have this gap.
 
 ## Contributing
 
