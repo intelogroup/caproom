@@ -241,6 +241,12 @@ function New-CappedProcess {
     $proc = Start-Process -FilePath $resolvedExe -ArgumentList $ArgLine -NoNewWindow `
         -RedirectStandardOutput $outFile -RedirectStandardError $errFile -PassThru
 
+    # Start-Process's PassThru object opens a limited-rights handle lazily --
+    # if .Handle is never touched while the process is still alive, .ExitCode
+    # silently reads back 0 for an already-exited process instead of the real
+    # code. Force the full-access handle open now, before it can exit.
+    $null = $proc.Handle
+
     $proc | Add-Member -NotePropertyName StdoutFile -NotePropertyValue $outFile
     $proc | Add-Member -NotePropertyName StderrFile -NotePropertyValue $errFile
     return $proc
