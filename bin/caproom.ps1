@@ -176,13 +176,28 @@ function ConvertTo-ArgString {
     $quoted -join ' '
 }
 
+function New-CappedProcess {
+    param([string]$Exe, [string]$Args)
+    $psi = New-Object Diagnostics.ProcessStartInfo
+    $psi.FileName = $Exe
+    $psi.Arguments = $Args
+    $psi.UseShellExecute = $false
+    $proc = [Diagnostics.Process]::Start($psi)
+    return $proc
+}
+
 function Invoke-Capped {
     param([int]$LimitMb, [double]$Interval, [bool]$ForceWatchdog, [string[]]$Command)
 
     $exe = $Command[0]
-    $rest = if ($Command.Length -gt 1) { ConvertTo-ArgString $Command[1..($Command.Length - 1)] } else { $null }
-    $startArgs = @{ FilePath = $exe; PassThru = $true; NoNewWindow = $true }
-    if ($rest) { $startArgs.ArgumentList = $rest }
+    $rest = if ($Command.Length -gt 1) { ConvertTo-ArgString $Command[1..($Command.Length - 1)] } else { '' }
+
+    # Raw System.Diagnostics.Process instead of Start-Process -PassThru: the
+    # PassThru process object's ExitCode read null even after WaitForExit()
+    # returned and HasExited was true (confirmed via CI trace), and Refresh()
+    # before reading it made things worse (read back a bogus nonzero code) --
+    # a handle-lifetime quirk specific to the Start-Process cmdlet wrapper.
+    # Driving Process directly is the documented-reliable pattern.
 
     if (-not $ForceWatchdog) {
         try {
@@ -214,12 +229,9 @@ function Invoke-Capped {
             }
 
             [Console]::Error.WriteLine("caproom: job object backend, limit=${LimitMb}m (committed memory, kernel-enforced, includes child processes)")
-            $proc = Start-Process @startArgs
+            $proc = New-CappedProcess -Exe $exe -Args $rest
             $proc.WaitForExit()
-            $proc.Refresh()
-            $code = $proc.ExitCode
-            if ($null -eq $code) { $code = 1 }
-            exit $code
+            exit $proc.ExitCode
         } catch {
             [Console]::Error.WriteLine("caproom: job object backend unavailable ($($_.Exception.Message)) -- falling back to watchdog")
         }
@@ -227,7 +239,7 @@ function Invoke-Capped {
 
     [Console]::Error.WriteLine("caproom: watchdog backend, limit=${LimitMb}m poll=${Interval}s (hard kill on breach -- Windows has no SIGTERM equivalent)")
     $limitBytes = [uint64]$LimitMb * 1MB
-    $proc = Start-Process @startArgs
+    $proc = New-CappedProcess -Exe $exe -Args $rest
     while (-not $proc.HasExited) {
         $proc.Refresh()
         if (-not $proc.HasExited -and $proc.WorkingSet64 -gt $limitBytes) {
@@ -237,10 +249,8 @@ function Invoke-Capped {
         }
         Start-Sleep -Seconds $Interval
     }
-    $proc.Refresh()
-    $code = $proc.ExitCode
-    if ($null -eq $code) { $code = 1 }
-    exit $code
+    $proc.WaitForExit()
+    exit $proc.ExitCode
 }
 
 # ---- argument parsing ----
