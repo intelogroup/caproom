@@ -300,6 +300,36 @@ function Wait-CappedProcess {
     }
 }
 
+# The watchdog must see the WHOLE tree, not just the top pid: coding agents
+# keep their memory in children (MCP servers, bundler daemons, headless
+# browsers) while the parent's own working set stays flat. Walk the
+# parent->child edges of one Win32_Process snapshot and sum working sets.
+function Get-TreeWorkingSetBytes {
+    param([int]$RootPid)
+    $ws = @{}
+    $kids = @{}
+    foreach ($p in Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId, WorkingSetSize) {
+        $pidInt = [int]$p.ProcessId
+        $ppidInt = [int]$p.ParentProcessId
+        $ws[$pidInt] = [uint64]$p.WorkingSetSize
+        if (-not $kids.ContainsKey($ppidInt)) { $kids[$ppidInt] = @() }
+        $kids[$ppidInt] += $pidInt
+    }
+    if (-not $ws.ContainsKey($RootPid)) { return [uint64]0 }
+    $total = [uint64]0
+    $queue = New-Object System.Collections.Queue
+    $visited = @{}
+    $queue.Enqueue($RootPid)
+    while ($queue.Count -gt 0) {
+        $cur = [int]$queue.Dequeue()
+        if ($visited.ContainsKey($cur)) { continue }   # pid-reuse / cycle guard
+        $visited[$cur] = $true
+        $total += $ws[$cur]
+        if ($kids.ContainsKey($cur)) { foreach ($c in $kids[$cur]) { [void]$queue.Enqueue($c) } }
+    }
+    return $total
+}
+
 function Invoke-Capped {
     param([int]$LimitMb, [double]$Interval, [bool]$ForceWatchdog, [string[]]$Command)
 
@@ -343,17 +373,18 @@ function Invoke-Capped {
         }
     }
 
-    [Console]::Error.WriteLine("caproom: watchdog backend, limit=${LimitMb}m poll=${Interval}s (hard kill on breach -- Windows has no SIGTERM equivalent)")
+    [Console]::Error.WriteLine("caproom: watchdog backend, limit=${LimitMb}m poll=${Interval}s (process-tree working set, hard kill on breach -- Windows has no SIGTERM equivalent)")
     $limitBytes = [uint64]$LimitMb * 1MB
     $proc = New-CappedProcess -Exe $exe -ArgLine $rest
     while (-not $proc.HasExited) {
-        $proc.Refresh()
-        if (-not $proc.HasExited -and $proc.WorkingSet64 -gt $limitBytes) {
-            [Console]::Error.WriteLine("caproom: pid $($proc.Id) working set $([math]::Round($proc.WorkingSet64/1MB))MB exceeded ${LimitMb}MB cap -- killing")
-            Stop-Process -Id $proc.Id -Force
+        Start-Sleep -Seconds $Interval
+        if ($proc.HasExited) { break }
+        $treeBytes = Get-TreeWorkingSetBytes -RootPid $proc.Id
+        if ($treeBytes -gt $limitBytes) {
+            [Console]::Error.WriteLine("caproom: process tree of pid $($proc.Id) using $([math]::Round($treeBytes/1MB))MB exceeded ${LimitMb}MB cap -- killing tree")
+            & taskkill.exe /PID $proc.Id /T /F 2>$null | Out-Null
             exit 137
         }
-        Start-Sleep -Seconds $Interval
     }
     exit (Wait-CappedProcess $proc)
 }
