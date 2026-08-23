@@ -49,6 +49,18 @@ jobs:
           $out = caproom init claude --limit 6144 | Out-String
           if ($out -notmatch 'function claude_capped') { throw "init output wrong:`n$out" }
 
+      - name: debug isolation - watchdog, no quoting
+        shell: pwsh
+        run: |
+          $out = caproom --limit 512 --force-watchdog -- node -v | Out-String
+          Write-Host "watchdog/no-quote result: [$($out.Trim())]"
+
+      - name: debug isolation - jobobject, no quoting
+        shell: pwsh
+        run: |
+          $out = caproom --limit 512 -- node -v | Out-String
+          Write-Host "jobobject/no-quote result: [$($out.Trim())]"
+
       - name: arguments with spaces survive intact
         shell: pwsh
         run: |

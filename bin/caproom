@@ -18,6 +18,7 @@ usage: caproom [--limit <mb>] [--image <docker-image>] [--interval <sec>] -- <co
        caproom park <pid>
        caproom wake <pid>
        caproom status <pid>
+       caproom guard [--threshold <pct>] [--interval <sec>] <pid...>
        caproom init <command> [--limit <mb>] [--grace <sec>]
 
   --limit <mb>     memory cap in MB (default: 4096)
@@ -38,6 +39,16 @@ becomes eligible for compression under system memory pressure. `caproom wake
 <pid>` (SIGCONT) brings it back instantly, same state, no restart needed.
 Any agent can call these directly — they're just SIGSTOP/SIGCONT, no daemon,
 no tracking file required.
+
+guard — watch SYSTEM-WIDE free memory (not any single process) and auto-park
+tracked pids (SIGSTOP) when free mem drops below --threshold percent, before
+the kernel OOM-killer has to pick a victim. Use it when unrelated heavy
+processes (e.g. a GPU inference job in one terminal, a TTS job in another)
+share a box and neither is individually over any --limit cap. Foreground,
+blocking; exits once all watched pids have exited. Does not auto-wake —
+`caproom wake <pid>` when memory pressure clears:
+
+  caproom guard --threshold 10 --interval 5 -- 12345 12346
 
 init <command> — print a shell snippet that auto-caps <command> on every
 invocation, so a new terminal tab is capped with no extra typing. Append the
