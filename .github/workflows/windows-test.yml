@@ -49,6 +49,29 @@ jobs:
           $out = caproom init claude --limit 6144 | Out-String
           if ($out -notmatch 'function claude_capped') { throw "init output wrong:`n$out" }
 
+      - name: debug isolation - raw Process class, bypass caproom.ps1 entirely
+        shell: pwsh
+        run: |
+          $psi = New-Object Diagnostics.ProcessStartInfo
+          $psi.FileName = (Get-Command node).Source
+          $psi.Arguments = '-v'
+          $psi.UseShellExecute = $false
+          $psi.RedirectStandardOutput = $true
+          $proc = New-Object Diagnostics.Process
+          $proc.StartInfo = $psi
+          [void]$proc.Start()
+          $out = $proc.StandardOutput.ReadToEnd()
+          $proc.WaitForExit()
+          Write-Host "raw Process class result: [$($out.Trim())] exit=[$($proc.ExitCode)]"
+
+      - name: debug isolation - Start-Process to file, bypass Process class entirely
+        shell: pwsh
+        run: |
+          $outFile = Join-Path $env:RUNNER_TEMP 'node-v-out.txt'
+          $p = Start-Process -FilePath (Get-Command node).Source -ArgumentList '-v' -NoNewWindow -RedirectStandardOutput $outFile -Wait -PassThru
+          $out = Get-Content $outFile -Raw
+          Write-Host "Start-Process-to-file result: [$($out.Trim())] exit=[$($p.ExitCode)]"
+
       - name: debug isolation - watchdog, no quoting
         shell: pwsh
         run: |
