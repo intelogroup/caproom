@@ -517,6 +517,7 @@ function Invoke-Watch {
             '--auto-park'           { $auto = $true }
             '--auto-wake-free-pct'  { $wake = [double]$Rest[$i + 1]; $i++ }
             '--json'                { $json = $true }
+            '--'                    { }
             default {
                 try { $targets.Add([int]$Rest[$i]) }
                 catch { [Console]::Error.WriteLine("caproom: unknown watch arg $($Rest[$i])"); exit 1 }
