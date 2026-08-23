@@ -1,13 +1,13 @@
 #Requires -Version 5.1
-# caproom — Windows backend.
+# caproom -- Windows backend.
 #
 # Enforcement uses a Job Object with JOB_OBJECT_LIMIT_PROCESS_MEMORY, which is a
 # real kernel-enforced cap (no polling race) and automatically covers child
-# processes. Note this limits *committed virtual memory*, not resident set — the
+# processes. Note this limits *committed virtual memory*, not resident set -- the
 # POSIX backend caps RSS, so the same --limit value can bite at a different point.
 #
 # park uses EmptyWorkingSet, which trims a process's working set to the pagefile
-# on demand without suspending it — unlike the POSIX backend's SIGSTOP, the
+# on demand without suspending it -- unlike the POSIX backend's SIGSTOP, the
 # process keeps running, so wake is a no-op here.
 
 $ErrorActionPreference = 'Stop'
@@ -30,11 +30,11 @@ usage: caproom [--limit <mb>] [--interval <sec>] -- <command> [args...]
 Windows differences from macOS/Linux:
   * No SIGTERM grace period. Windows console apps have no signal equivalent,
     so a watchdog breach is a hard kill. The Job Object backend does not kill
-    at all — the allocation simply fails inside the process.
+    at all -- the allocation simply fails inside the process.
   * park <pid> uses EmptyWorkingSet: memory is trimmed to the pagefile
     immediately, on demand, and the process KEEPS RUNNING. There is no
     suspension, so it cannot hang a process that something is waiting on.
-  * wake <pid> is a no-op — nothing was suspended. Trimmed pages fault back
+  * wake <pid> is a no-op -- nothing was suspended. Trimmed pages fault back
     in by themselves on next access.
 
 env vars (override flags): CAPROOM_LIMIT_MB, CAPROOM_INTERVAL
@@ -120,7 +120,7 @@ function Invoke-Park {
         exit 1
     }
     $after = (Get-Process -Id $TargetPid).WorkingSet64
-    [Console]::Error.WriteLine("caproom: pid $TargetPid parked — working set trimmed $([math]::Round($before/1MB))MB -> $([math]::Round($after/1MB))MB. Process is STILL RUNNING (no suspension); pages fault back in on access.")
+    [Console]::Error.WriteLine("caproom: pid $TargetPid parked -- working set trimmed $([math]::Round($before/1MB))MB -> $([math]::Round($after/1MB))MB. Process is STILL RUNNING (no suspension); pages fault back in on access.")
 }
 
 function Invoke-Wake {
@@ -128,7 +128,7 @@ function Invoke-Wake {
     if (-not (Get-Process -Id $TargetPid -ErrorAction SilentlyContinue)) {
         [Console]::Error.WriteLine("caproom: no such pid $TargetPid"); exit 1
     }
-    [Console]::Error.WriteLine("caproom: pid $TargetPid — nothing to wake. On Windows park trims the working set without suspending, so the process never stopped running.")
+    [Console]::Error.WriteLine("caproom: pid $TargetPid -- nothing to wake. On Windows park trims the working set without suspending, so the process never stopped running.")
 }
 
 function Invoke-Status {
@@ -147,7 +147,7 @@ function Invoke-Status {
 function Invoke-Init {
     param([string]$Target, [int]$LimitMb)
     @"
-# caproom: auto-cap '$Target' — added by 'caproom init $Target'
+# caproom: auto-cap '$Target' -- added by 'caproom init $Target'
 # override per-shell: `$env:CAPROOM_LIMIT_MB = 8192
 function ${Target}_capped {
     `$limit = if (`$env:CAPROOM_LIMIT_MB) { `$env:CAPROOM_LIMIT_MB } else { $LimitMb }
@@ -186,7 +186,7 @@ function Invoke-Capped {
 
             # Assign THIS process to the job before spawning. Children are
             # associated automatically at CreateProcess time, so the cap is live
-            # before the child runs a single instruction — assigning the child
+            # before the child runs a single instruction -- assigning the child
             # after Start-Process leaves a window where it can already allocate.
             if (-not [Caproom]::AssignProcessToJobObject($job, [Diagnostics.Process]::GetCurrentProcess().Handle)) {
                 throw "AssignProcessToJobObject failed (error $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
@@ -197,17 +197,17 @@ function Invoke-Capped {
             $proc.WaitForExit()
             exit $proc.ExitCode
         } catch {
-            [Console]::Error.WriteLine("caproom: job object backend unavailable ($($_.Exception.Message)) — falling back to watchdog")
+            [Console]::Error.WriteLine("caproom: job object backend unavailable ($($_.Exception.Message)) -- falling back to watchdog")
         }
     }
 
-    [Console]::Error.WriteLine("caproom: watchdog backend, limit=${LimitMb}m poll=${Interval}s (hard kill on breach — Windows has no SIGTERM equivalent)")
+    [Console]::Error.WriteLine("caproom: watchdog backend, limit=${LimitMb}m poll=${Interval}s (hard kill on breach -- Windows has no SIGTERM equivalent)")
     $limitBytes = [uint64]$LimitMb * 1MB
     $proc = Start-Process -FilePath $exe -ArgumentList $rest -PassThru -NoNewWindow
     while (-not $proc.HasExited) {
         $proc.Refresh()
         if (-not $proc.HasExited -and $proc.WorkingSet64 -gt $limitBytes) {
-            [Console]::Error.WriteLine("caproom: pid $($proc.Id) working set $([math]::Round($proc.WorkingSet64/1MB))MB exceeded ${LimitMb}MB cap — killing")
+            [Console]::Error.WriteLine("caproom: pid $($proc.Id) working set $([math]::Round($proc.WorkingSet64/1MB))MB exceeded ${LimitMb}MB cap -- killing")
             Stop-Process -Id $proc.Id -Force
             exit 137
         }
