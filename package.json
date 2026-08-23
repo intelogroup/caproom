@@ -1,7 +1,7 @@
 {
   "name": "caproom",
   "version": "0.2.0",
-  "description": "Memory-cap any command (AI coding agents, builds, background jobs) on macOS/Linux — real enforcement via Docker cgroups or a polling watchdog, since macOS has no working per-process memory rlimit.",
+  "description": "Memory-cap any command (AI coding agents, builds, background jobs) on macOS/Linux — real enforcement via Docker cgroups or a polling watchdog, plus park/wake to reclaim idle process memory without killing.",
   "bin": {
     "caproom": "bin/caproom"
   },
@@ -12,11 +12,12 @@
     "memory",
     "oom",
     "cgroup",
-    "rlimit",
     "macos",
     "watchdog",
     "ai-agent",
-    "process-limit"
+    "process-limit",
+    "park",
+    "idle-memory"
   ],
   "os": [
     "darwin",
