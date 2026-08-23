@@ -10,7 +10,10 @@
 set -euo pipefail
 
 usage() {
-  cat >&2 << 'EOF'
+  local stream=/dev/stderr
+  local code=1
+  if [[ "${1:-}" == "help" ]]; then stream=/dev/stdout; code=0; fi
+  cat >"$stream" << 'EOF'
 usage: caproom [--limit <mb>] [--image <docker-image>] [--interval <sec>] -- <command> [args...]
        caproom park <pid>
        caproom wake <pid>
@@ -51,7 +54,7 @@ examples:
   caproom wake 12345
   caproom init claude --limit 6144 --grace 10
 EOF
-  exit 1
+  exit "$code"
 }
 
 cmd_init() {
@@ -105,6 +108,7 @@ case "${1:-}" in
   wake) shift; cmd_wake "$@"; exit 0 ;;
   status) shift; cmd_status "$@"; exit 0 ;;
   init) shift; cmd_init "$@"; exit 0 ;;
+  help|-h|--help) usage help ;;
 esac
 
 LIMIT_MB="${CAPROOM_LIMIT_MB:-4096}"
@@ -121,7 +125,7 @@ while [[ $# -gt 0 ]]; do
     --grace) GRACE="$2"; shift 2 ;;
     --force-watchdog) FORCE_WATCHDOG=1; shift ;;
     --) shift; break ;;
-    -h|--help) usage ;;
+    -h|--help) usage help ;;
     *) break ;;
   esac
 done
