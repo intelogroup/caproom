@@ -211,7 +211,15 @@ jobs:
             -ArgumentList @((Join-Path $PWD 'bin\caproom.js'),'watch','--json','--threshold-mb','1000000','--interval','1','--',"$($p.Id)") `
             -RedirectStandardOutput $outFile -RedirectStandardError $errFile -NoNewWindow -PassThru
           # watcher exits by itself once all watched pids exit (~6s); give it 25s max
-          if (-not $w.WaitForExit(25000)) { Stop-Process -Id $w.Id -Force; throw "watcher did not exit within 25s" }
+          if (-not $w.WaitForExit(25000)) {
+            Write-Host "--- watcher stdout ---"; Get-Content $outFile -ErrorAction SilentlyContinue
+            Write-Host "--- watcher stderr ---"; Get-Content $errFile -ErrorAction SilentlyContinue
+            Write-Host "--- live caproom-related processes ---"
+            Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'caproom|Start-Sleep' } |
+              ForEach-Object { Write-Host "pid=$($_.ProcessId) ppid=$($_.ParentProcessId): $($_.CommandLine)" }
+            Stop-Process -Id $w.Id -Force -ErrorAction SilentlyContinue
+            throw "watcher did not exit within 25s"
+          }
           Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
           Write-Host "--- stderr ---"; Get-Content $errFile -ErrorAction SilentlyContinue | Select-Object -First 4
           $first = (Get-Content $outFile -ErrorAction Stop | Select-Object -First 1) | ConvertFrom-Json
