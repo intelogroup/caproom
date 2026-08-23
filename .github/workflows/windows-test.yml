@@ -72,6 +72,26 @@ jobs:
           $out = Get-Content $outFile -Raw
           Write-Host "Start-Process-to-file result: [$($out.Trim())] exit=[$($p.ExitCode)]"
 
+      - name: debug isolation - same repro via literal powershell.exe -File (matches caproom.js exactly)
+        shell: pwsh
+        run: |
+          $script = @'
+          $psi = New-Object Diagnostics.ProcessStartInfo
+          $psi.FileName = (Get-Command node).Source
+          $psi.Arguments = "-v"
+          $psi.UseShellExecute = $false
+          $psi.RedirectStandardOutput = $true
+          $proc = New-Object Diagnostics.Process
+          $proc.StartInfo = $psi
+          [void]$proc.Start()
+          $out = $proc.StandardOutput.ReadToEnd()
+          $proc.WaitForExit()
+          Write-Host "posh5.1-via-File result: [$($out.Trim())] exit=[$($proc.ExitCode)]"
+'@
+          $tmp = Join-Path $env:RUNNER_TEMP 'repro.ps1'
+          Set-Content -Path $tmp -Value $script
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File $tmp
+
       - name: debug isolation - watchdog, no quoting
         shell: pwsh
         run: |
