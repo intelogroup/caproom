@@ -169,7 +169,8 @@ pub fn handle_run(command: Vec<String>, limit_mb: u64) -> serde_json::Value {
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr).to_string();
             let stdout = String::from_utf8_lossy(&o.stdout).to_string();
-            let killed = stderr.contains("KILLED BY CAP") || stderr.contains("exceeded") || o.status.code() == Some(137) || o.status.code() == Some(143);
+            // cap-kill detection by exit code only (137 = SIGKILL, 143 = SIGTERM)
+            let killed = matches!(o.status.code(), Some(137) | Some(143));
             serde_json::json!({"command": command, "limit_mb": limit_mb, "exit_code": o.status.code().unwrap_or(-1), "killed_by_cap": killed, "stdout": stdout, "stderr": stderr, "reason_code": if killed { "PRESSURE" } else { "NONE" }})
         },
         Err(e) => serde_json::json!({"error": e.to_string()}),

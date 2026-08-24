@@ -274,17 +274,6 @@ fn snapshot_ps() -> Snapshot {
         let state = toks[4].chars().next().unwrap_or('?');
         // command is original line after the 5th token's position — recover verbatim tail
         let cmd = if toks.len() > 5 {
-            // find 5th token end index in original
-            let mut idx = 0usize;
-            let mut count = 0;
-            for (i, c) in t.char_indices() {
-                if c.is_whitespace() {
-                    // skip whitespace run
-                    while t[idx..].chars().next().map(|x| x.is_whitespace()).unwrap_or(false) { idx+=1; }
-                    let _ = &t[i..];
-                }
-            }
-            // simpler: join remaining toks with space (lossy but stable for display)
             toks[5..].join(" ")
         } else { String::new() };
         if pid == 0 { continue; }
