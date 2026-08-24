@@ -130,12 +130,12 @@ fn cmd_top(json: bool, filter_pid: Option<i32>, park_min_mb: u64) {
     let ids: Vec<i32> = out.iter().map(|p| p.pid).collect();
     ring.prune_stale(&ids);
     drop(ring);
-    out.sort_by(|a,b| b.tree_rss_kb.cmp(&a.tree_rss_kb));
+    out.sort_by_key(|a| std::cmp::Reverse(a.tree_rss_kb));
     if json {
         let v = serde_json::json!({"schema":1,"ts": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(), "limit_mb_default": 4096, "processes": out});
         println!("{}", serde_json::to_string(&v).unwrap());
     } else {
-        println!("{:<8} {:>10} {:<8} {:<9} {}", "PID", "TREE_MB", "STATE", "PIDS", "COMMAND");
+        println!("{:<8} {:>10} {:<8} {:<9} COMMAND", "PID", "TREE_MB", "STATE", "PIDS");
         for p in &out { println!("{:<8} {:>10} {:<8} {:<9} {}", p.pid, p.tree_rss_kb/1024, p.state, p.tree_pids.len(), truncate_cmd(&p.cmd, 60)); }
     }
 }
@@ -240,7 +240,7 @@ fn cmd_calibrate(duration: u64) {
     let snap = collector::snapshot_current_user();
     // measure top 3 trees to estimate agent envelope
     let mut trees: Vec<_> = Tree::roots(&snap).into_iter().filter_map(|r| Tree::build(r, &snap)).collect();
-    trees.sort_by(|a,b| b.footprint_kb.cmp(&a.footprint_kb));
+    trees.sort_by_key(|t| std::cmp::Reverse(t.footprint_kb));
     let top_mb: u64 = trees.iter().take(3).map(|t| t.footprint_kb/1024).sum();
     // suggestion: 60% of total for 24GB→14G, clamp to 4G min, 80% max
     let suggested = ((total_kb as f64 * 0.6) as u64).clamp(4096*1024/1024, (total_kb as f64 * 0.8) as u64) /1024;
@@ -290,8 +290,8 @@ fn cmd_run(cmd: Vec<String>, limit_mb: u64, interval: f64, grace: u64) {
             // growth trigger via shared history ring (same as MCP): >200 KB/s sustained
             let growth_kb_s = {
                 let mut rg = cli_growth().lock().unwrap();
-                let g = rg.update(pid, tree.footprint_kb);
-                g
+                
+                rg.update(pid, tree.footprint_kb)
             };
             let growth_trigger = caproom_core::growth::should_enforce_growth(growth_kb_s, tree.footprint_kb, eff_kb, free);
             if tree.footprint_kb >= eff_kb || growth_trigger {
@@ -349,15 +349,18 @@ fn cmd_run(cmd: Vec<String>, limit_mb: u64, interval: f64, grace: u64) {
                 #[cfg(windows)]
                 for p in &tree.pids { let _ = std::process::Command::new("taskkill").args(["/PID", &p.to_string(), "/T"]).output(); }
                 let mut waited = 0;
+                let mut child_exit: Option<i32> = None;
                 while waited < grace {
                     std::thread::sleep(std::time::Duration::from_secs(1));
                     waited += 1;
                     if let Ok(Some(s)) = child.try_wait() {
-#[cfg(unix)]
-                        let code = s.code().or_else(|| s.signal().map(|sig| 128 + sig)).unwrap_or(0);
+                        // root may die before stragglers — record its code but
+                        // fall through to the KILL sweep so no orphan survives
+                        #[cfg(unix)]
+                        { child_exit = Some(s.code().or_else(|| s.signal().map(|sig| 128 + sig)).unwrap_or(0)); }
                         #[cfg(windows)]
-                        let code = s.code().unwrap_or(0);
-                        std::process::exit(code);
+                        { child_exit = Some(s.code().unwrap_or(0)); }
+                        break;
                     }
                 }
                 #[cfg(unix)]
@@ -375,9 +378,9 @@ fn cmd_run(cmd: Vec<String>, limit_mb: u64, interval: f64, grace: u64) {
                 for p in &tree.pids { let _ = std::process::Command::new("taskkill").args(["/PID", &p.to_string(), "/F", "/T"]).output(); }
                 let status = child.wait().unwrap();
                 #[cfg(unix)]
-                let code = status.code().or_else(|| status.signal().map(|sig| 128 + sig)).unwrap_or(137);
+                let code = status.code().or_else(|| status.signal().map(|sig| 128 + sig)).or(child_exit).unwrap_or(137);
                 #[cfg(windows)]
-                let code = status.code().unwrap_or(137);
+                let code = status.code().or(child_exit).unwrap_or(137);
                 std::process::exit(code);
             }
         } else {
