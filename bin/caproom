@@ -37,6 +37,11 @@ usage: caproom [--limit <mb>] [--image <docker-image>] [--interval <sec>] -- <co
   --no-intercept-tty bypass stdio interposition for TUI/pty apps (OSC 10/11,
                     DSR CPR, mouse DEC 1003) — exec directly and monitor via
                     detached 'caproom watch --auto-park' instead
+  --pty            allocate a pty (forkpty) and forward bytes verbatim — full
+                    terminal fidelity for TUI (requires python3 or script)
+                    implies --no-intercept-tty + pty watchdog on the pty
+                    tree; fallback to bypass if pty alloc fails
+  --no-pty         disable pty allocation (use bypass or watchdog)
 
 park / wake — freeze an idle process so the kernel CAN reclaim/compress its
 memory without killing it. Honest semantics: SIGSTOP only makes the pages
@@ -64,12 +69,14 @@ output to your shell rc (~/.zshrc, ~/.bashrc):
 
   caproom init claude >> ~/.zshrc && source ~/.zshrc
 
-env vars (override flags): CAPROOM_LIMIT_MB, CAPROOM_IMAGE, CAPROOM_INTERVAL, CAPROOM_GRACE, CAPROOM_BYPASS_TTY=1
+env vars (override flags): CAPROOM_LIMIT_MB, CAPROOM_IMAGE, CAPROOM_INTERVAL, CAPROOM_GRACE, CAPROOM_BYPASS_TTY=1, CAPROOM_PTY=1
 
 TUI note: 'caproom -- <TUI>' (opencode, vim, htop, ...) bypasses stdio when [ -t 0 ] && [ -t 1 ]
 so terminal queries (OSC, mouse) stay on the pty. The cap is then advisory via a detached
-'caproom watch --auto-park' monitor. Piped/batch 'caproom -- opencode run "task"' stays fully capped.
-Use --no-intercept-tty / CAPROOM_BYPASS_TTY=1 to force bypass for any command.
+'caproom watch --auto-park' monitor, or via '--pty' which allocates a real pty (forkpty)
+and forwards bytes verbatim (python3 or script). Piped/batch 'caproom -- opencode run "task"'
+stays fully capped. Use --no-intercept-tty / CAPROOM_BYPASS_TTY=1 to force bypass, --pty /
+CAPROOM_PTY=1 to force pty.
 
 examples:
   caproom --limit 2048 -- npm run build
@@ -749,7 +756,9 @@ INTERVAL="${CAPROOM_INTERVAL:-0.2}"
 GRACE="${CAPROOM_GRACE:-5}"
 USE_DOCKER=0
 BYPASS_TTY=0
+USE_PTY=0
 [[ "${CAPROOM_BYPASS_TTY:-0}" == "1" ]] && BYPASS_TTY=1
+[[ "${CAPROOM_PTY:-0}" == "1" ]] && USE_PTY=1
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -762,6 +771,8 @@ while [[ $# -gt 0 ]]; do
     # scripts and init snippets keep working
     --force-watchdog) shift ;;
     --no-intercept-tty) BYPASS_TTY=1; shift ;;
+    --pty) USE_PTY=1; shift ;;
+    --no-pty) USE_PTY=0; shift ;;
     --) shift; break ;;
     -h|--help) usage help ;;
     *) break ;;
@@ -792,7 +803,106 @@ is_known_tui() {
   esac
 }
 
+SPAWN_PID=""
+spawn_with_pty() {
+  # Try python3 pty_wrapper.py, then script fallback. Sets SPAWN_PID on success.
+  local wrapper
+  wrapper="$(dirname "${BASH_SOURCE[0]:-$0}")/../scripts/pty_wrapper.py"
+  if [[ ! -f "$wrapper" ]]; then
+    local cap_path
+    cap_path="$(command -v caproom 2>/dev/null || echo "")"
+    if [[ -n "$cap_path" ]]; then
+      wrapper="$(dirname "$cap_path")/../scripts/pty_wrapper.py"
+      [[ ! -f "$wrapper" ]] && wrapper="$(dirname "$(dirname "$cap_path")")/scripts/pty_wrapper.py"
+    fi
+  fi
+  [[ ! -f "$wrapper" ]] && wrapper="$HOME/Developer/caproom/scripts/pty_wrapper.py"
+  if [[ -f "$wrapper" ]] && command -v python3 >/dev/null 2>&1 && python3 -c "import pty" 2>/dev/null; then
+    # Avoid stdout capture issue: run in a way that doesn't hold the caller's command-substitution pipe.
+    # Use a temp file to pass pid back if needed, but we set global.
+    python3 "$wrapper" "$@" &
+    SPAWN_PID=$!
+    return 0
+  fi
+  if command -v script >/dev/null 2>&1; then
+    if [[ "$(uname)" == "Darwin" ]]; then
+      script -q /dev/null "$@" &
+      SPAWN_PID=$!
+      return 0
+    else
+      local cmd
+      cmd=$(printf '%q ' "$@")
+      script -q -c "$cmd" /dev/null &
+      SPAWN_PID=$!
+      return 0
+    fi
+  fi
+  return 1
+}
+
 run_watchdog() {
+  # PTY mode: allocate a real pty (forkpty) and forward bytes verbatim.
+  # Full terminal fidelity — OSC 10/11, DSR CPR, mouse DEC 1003 all work
+  # because the TUI talks to a real pty, not a pipe. Watchdog still enforces
+  # the cap on the pty tree (same kill logic as normal).
+  if [[ "$USE_PTY" -eq 1 ]]; then
+    echo "caproom: pty mode — allocating pty via forkpty for '${1##*/}' (limit ${LIMIT_MB}m, verbatim forwarding)" >&2
+    printf '\033[?1049l\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?2004l\033[?25h' >/dev/tty 2>/dev/null || true
+    local saved_stty=""
+    if [[ -t 0 ]]; then
+      saved_stty=$(stty -g </dev/tty 2>/dev/null || true)
+    fi
+    restore_pty() {
+      [[ -n "$saved_stty" ]] && stty "$saved_stty" </dev/tty 2>/dev/null \
+        || { [[ -t 0 ]] && stty sane </dev/tty 2>/dev/null || true; }
+      printf '\033[?1049l\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?2004l\033[?25h' >/dev/tty 2>/dev/null || true
+    }
+    local pty_pid
+    if spawn_with_pty "$@"; then
+      pty_pid=$SPAWN_PID
+      echo "caproom: pty allocated, pid $pty_pid — monitoring tree RSS" >&2
+      local limit_kb=$(( LIMIT_MB * 1024 ))
+      local exit_code=0
+      while kill -0 "$pty_pid" 2>/dev/null; do
+        collect_tree "$pty_pid"
+        if [[ "${#TREE_PIDS[@]}" -gt 0 && "$TREE_RSS_KB" -gt "$limit_kb" ]]; then
+          local overshoot=$(( TREE_RSS_KB * 100 / limit_kb ))
+          echo "caproom: pid $pty_pid tree RSS ${TREE_RSS_KB}KB exceeded ${limit_kb}KB cap (+${overshoot}%) — killing pty tree (grace ${GRACE}s)" >&2
+          kill -TERM "${TREE_PIDS[@]}" 2>/dev/null || true
+          local -a breach_pids=("${TREE_PIDS[@]}")
+          local waited=0
+          while kill -0 "$pty_pid" 2>/dev/null && [[ "$waited" -lt "$GRACE" ]]; do
+            sleep 1
+            waited=$(( waited + 1 ))
+          done
+          local sp sweep=0
+          for sp in "${breach_pids[@]}"; do
+            if kill -0 "$sp" 2>/dev/null; then
+              kill -9 "$sp" 2>/dev/null || true
+              sweep=$(( sweep + 1 ))
+            fi
+          done
+          if [[ "$sweep" -gt 0 ]]; then
+            echo "caproom: SIGKILLed ${sweep} survivor(s) after grace — exit 137" >&2
+            wait "$pty_pid" 2>/dev/null || true
+            restore_pty
+            exit 137
+          fi
+          wait "$pty_pid" 2>/dev/null || exit_code=$?
+          echo "caproom: pid $pty_pid exited cleanly (code $exit_code) during grace period" >&2
+          restore_pty
+          exit "$exit_code"
+        fi
+        sleep "$INTERVAL"
+      done
+      wait "$pty_pid" 2>/dev/null || exit_code=$?
+      restore_pty 2>/dev/null || true
+      exit "$exit_code"
+    else
+      echo "caproom: pty alloc failed — falling back to bypass/watchdog" >&2
+      restore_pty 2>/dev/null || true
+    fi
+  fi
   # TUI bypass: if stdio is a tty and target is a known TUI (or bypass flag),
   # don't sit on stdio — exec directly and monitor via detached watch.
   # This preserves pty semantics (OSC 10/11, DSR CPR, DEC 1003 mouse) that

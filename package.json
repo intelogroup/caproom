@@ -11,7 +11,8 @@
     "bin/caproom.js",
     "bin/caproom.ps1",
     "bin/caproom-mcp.js",
-    "scripts/postinstall.js"
+    "scripts/postinstall.js",
+    "scripts/pty_wrapper.py"
   ],
   "keywords": [
     "memory",
