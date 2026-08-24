@@ -1,4 +1,4 @@
-use caproom_core::{collector, growth, pressure, process_tree::Tree, policy::{is_idle_subtree, TreeView}};
+use caproom_core::{collector, growth, pressure, process_tree::Tree, policy::{is_idle_subtree, TreeView}, CpuRing};
 use clap::{Parser, Subcommand};
 use std::collections::HashMap;
 #[cfg(unix)]
@@ -62,6 +62,10 @@ fn main() {
 static CLI_GROWTH: std::sync::OnceLock<std::sync::Mutex<growth::GrowthRing>> = std::sync::OnceLock::new();
 fn cli_growth() -> &'static std::sync::Mutex<growth::GrowthRing> {
     CLI_GROWTH.get_or_init(|| std::sync::Mutex::new(growth::GrowthRing::new()))
+}
+static CLI_CPU: std::sync::OnceLock<std::sync::Mutex<CpuRing>> = std::sync::OnceLock::new();
+fn cli_cpu() -> &'static std::sync::Mutex<CpuRing> {
+    CLI_CPU.get_or_init(|| std::sync::Mutex::new(CpuRing::new()))
 }
 fn cmd_top(json: bool, filter_pid: Option<i32>, park_min_mb: u64) {
     let snap = collector::snapshot_current_user();
@@ -197,8 +201,13 @@ fn cmd_run(cmd: Vec<String>, limit_mb: u64, interval: f64, grace: u64) {
                 // fix #2: park idle subtrees → resample → only TERM if still over
                 let states: HashMap<i32,char> = snap.procs.iter().map(|p| (p.pid, p.state)).collect();
                 let foot: HashMap<i32,u64> = snap.procs.iter().map(|p| (p.pid, p.footprint_kb)).collect();
-                let leaders: HashMap<i32,bool> = HashMap::new(); // TODO: tcgetpgrp foregroup
-                let cpu: HashMap<i32,f32> = HashMap::new();
+                // wired 0.8.2: derive is_session_leader via pgid==pid (session/group leader, foregroup never parks)
+                // and cpu_delta via CpuRing (mach task_info / proc stat delta, 2% threshold keeps active watcher alive)
+                let leaders: HashMap<i32,bool> = snap.procs.iter().map(|p| (p.pid, p.pgid == p.pid)).collect();
+                let cpu: HashMap<i32,f32> = {
+                    let mut ring = cli_cpu().lock().unwrap();
+                    snap.procs.iter().map(|p| (p.pid, ring.update(p.pid, p.cpu_time_ns))).collect()
+                };
                 let view = TreeView{ root: pid, pids: &tree.pids, states: &states, footprints: &foot, is_session_leader: &leaders, cpu_delta: &cpu };
                 let idle: Vec<i32> = tree.pids.iter().copied().filter(|p| is_idle_subtree(*p, pid, &view, &ppid_map)).collect();
                 if !idle.is_empty() {

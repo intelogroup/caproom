@@ -1,3 +1,13 @@
+## 0.8.2 — 2026-08-24
+
+### Fixed
+- **Wire `cpu_delta` and `is_session_leader` idle gates (0.8.1 blind spot):** `collector` now captures `cpu_time_ns` via `proc_pid_rusage` (`ri_user_time + ri_system_time`) and `/proc/[pid]/stat` on Linux; `cli` `CpuRing` computes `delta/elapsed` with 2% threshold (`<0.02` idle). First sample assumes busy (1.0) so active watcher not parked on first sight. `is_session_leader` derived via `pgid == pid` (foreground group/session leader never parks). Adds `park_does_not_hang_active_watcher` real-FFI test (busy python spinner vs sleep).
+- **Release unblocked:** `release.yml` `build` now `continue-on-error` for `windows-2022` so `x86_64-pc-windows-msvc` no longer blocks GitHub Release / npm / cargo publish.
+
+### Changed
+- `caproom-core` `ProcInfo` adds `cpu_time_ns` (serde default for compat).
+- `Cargo.toml` workspace version `0.8.1` → `0.8.2`.
+
 # Changelog
 
 ## 0.7.6 — 2026-08-24

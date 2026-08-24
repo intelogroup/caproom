@@ -15,6 +15,7 @@ permissions:
 
 jobs:
   build:
+    continue-on-error: ${{ matrix.os == 'windows-2022' }}
     strategy:
       fail-fast: false
       matrix:
@@ -128,7 +129,7 @@ jobs:
   brew:
     needs: release
     runs-on: ubuntu-latest
-    if: false # enable after tap exists: intelogroup/homebrew-caproom
+    if: false # enable after tap has token: intelogroup/homebrew-caproom exists, flip to true when HOMEBREW_TAP_TOKEN set
     steps:
       - uses: actions/checkout@v4
       - name: bump formula

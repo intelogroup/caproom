@@ -7,6 +7,9 @@ pub struct ProcInfo {
     pub pgid: i32,
     /// phys_footprint (macOS) or PSS/RSS fallback, KB
     pub footprint_kb: u64,
+    /// total cpu time user+system in nanoseconds (monotonic, for delta)
+    #[serde(default)]
+    pub cpu_time_ns: u64,
     /// state char: R/S/I/T/Z
     pub state: char,
     pub cmd: String,
@@ -147,9 +150,9 @@ fn snapshot_libproc() -> Option<Snapshot> {
         // phys_footprint via rusage — fallback to TASKINFO resident if rusage fails (perm)
         let mut ru = MaybeUninit::<RusageInfoV4>::uninit();
         let rret = unsafe { proc_pid_rusage(pid, RUSAGE_INFO_V4, ru.as_mut_ptr() as *mut c_void) };
-        let footprint_kb = if rret == 0 {
+        let (footprint_kb, cpu_time_ns) = if rret == 0 {
             let ru = unsafe { ru.assume_init() };
-            ru.ri_phys_footprint / 1024
+            (ru.ri_phys_footprint / 1024, ru.ri_user_time + ru.ri_system_time)
         } else {
             // fallback: try taskinfo resident_size, else skip
             const PROC_PIDTASKINFO: c_int = 4;
@@ -178,7 +181,7 @@ fn snapshot_libproc() -> Option<Snapshot> {
             let tret = unsafe { proc_pidinfo(pid, PROC_PIDTASKINFO, 0, ti.as_mut_ptr() as *mut c_void, std::mem::size_of::<ProcTaskInfo>() as c_int) };
             if tret == std::mem::size_of::<ProcTaskInfo>() as c_int {
                 let ti = unsafe { ti.assume_init() };
-                ti.pti_resident_size / 1024
+                (ti.pti_resident_size / 1024, ti.pti_total_user + ti.pti_total_system)
             } else {
                 continue;
             }
@@ -209,6 +212,7 @@ fn snapshot_libproc() -> Option<Snapshot> {
             ppid: bsd.pbi_ppid as i32,
             pgid: bsd.pbi_pgid as i32,
             footprint_kb,
+            cpu_time_ns,
             state: state_char,
             cmd,
         });
@@ -251,7 +255,28 @@ fn snapshot_ps() -> Snapshot {
             toks[5..].join(" ")
         } else { String::new() };
         if pid == 0 { continue; }
-        procs.push(ProcInfo { pid, ppid, pgid, footprint_kb: rss, state, cmd });
+        // Linux: derive cpu_time_ns from /proc/[pid]/stat utime+stime (ticks -> ns, 100Hz)
+        let cpu_time_ns = {
+            #[cfg(target_os = "linux")]
+            {
+                std::fs::read_to_string(format!("/proc/{}/stat", pid)).ok().and_then(|s| {
+                    // comm is between parentheses, fields after are space-separated
+                    let after = s.rsplit(')').next()?;
+                    let f: Vec<&str> = after.split_whitespace().collect();
+                    // after ')' , field 14 utime is index 12? Actually after comm, field 14 is utime at idx 11 (0-based after split)
+                    // fields: 1 pid ...) state ppid pgrp session tty tpgid flags minflt cminflt majflt cmajflt utime stime
+                    // after ')' split: ["", "S", "ppid", ...]; so utime at 11, stime at 12
+                    if f.len() > 13 {
+                        let ut: u64 = f[11].parse().ok()?;
+                        let st: u64 = f[12].parse().ok()?;
+                        Some((ut + st) * 10_000_000) // 1 tick = 10ms @100Hz = 10_000_000 ns
+                    } else { None }
+                }).unwrap_or(0)
+            }
+            #[cfg(not(target_os = "linux"))]
+            { 0u64 }
+        };
+        procs.push(ProcInfo { pid, ppid, pgid, footprint_kb: rss, cpu_time_ns, state, cmd });
     }
     Snapshot { procs }
 }

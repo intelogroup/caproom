@@ -36,7 +36,7 @@ caproom/
 
 ## 3. core mechanism — never park active root
 
-### 3.1 predicate fix #1: ancestry walk, not ppid == root
+### 3.1 predicate fix #1: ancestry walk, not ppid == root (wired 0.8.2: cpu_delta via CpuRing + is_session_leader pgid==pid)
 
 Grandchild watchers (`npm run dev → vite → eslint`) have `ppid = vite`, not root. Direct compare would never qualify nested idle watchers.
 
@@ -66,7 +66,7 @@ Enumeration: walk `TREE_PIDS` from `walk_tree:193` lineage, filter by this. Root
 `dRSS/dt` on `phys_footprint` sampled per pressure callback or 200ms poll. Flat 4GB build → 0 MB/s → no touch. Leak 500 MB/s → breach even if `<limit`. Threshold:
 
 ```
-effective_limit = min(limit, limit * (0.8 + 0.2*free_pct/15)) // free_pct from vm_stat / MemAvailable
+effective_limit = limit if free_pct >=15 else limit * (80 + 20*free_pct/15)/100  // == limit*(0.8+0.2*free_pct/15), code pressure.rs:effective_limit
 ```
 
 `free_pct` lowers trigger point under pressure but does NOT change action set — more alert, not more aggressive against root.
@@ -159,7 +159,7 @@ Each CLI instance reads `free_mem_pct` (`vm_stat` free+inactive `bin/caproom:441
 
 ## 12. pass/fail — updated to reality (not aspirational)
 
- - Pass: this doc exists, `cargo build --release` <10ms startup, `phys_footprint` collector correct (bench `scripts/bench_phys_vs_ps.sh` 13ms vs ps 20ms per `top --json`, 30% faster, phys_footprint vs RSS shared overcount), `test/sum-oom.sh` **real blocking gate** now passes 6/6 capped 143 (was stub exit 0 false green, fixed to check non-zero signal + enforce), `top --json` schema1 typed enums, CI gates enforce footprint every commit.
+ - Pass: this doc exists, `cargo build --release` <10ms startup, `22` tests (`park_does_not_hang_active_watcher` + `CpuRing`) green, `phys_footprint` collector correct (bench `scripts/bench_phys_vs_ps.sh` 13ms vs ps 20ms per `top --json`, 30% faster, phys_footprint vs RSS shared overcount), `test/sum-oom.sh` **real blocking gate** now passes 6/6 capped 143 (was stub exit 0 false green, fixed to check non-zero signal + enforce), `top --json` schema1 typed enums, CI gates enforce footprint every commit.
  - Fail: any open marked TBD, `dispatch_source` claimed without code, `rmcp` claimed without Cargo.toml grep, or `ppid==root` / unconditional TERM remains. Prior w3 MCP merge while w2 gate stub green was broken gate discipline — fixed, stub now fails if no hog capped.
 
 ## 13. risks

@@ -259,4 +259,55 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
     }
+
+    #[test]
+    fn park_does_not_hang_active_watcher() {
+        // Active watcher: simulating `while true; wait` loop that an agent might hang on.
+        // Must not be parked: cpu_delta >=0.02 (busy) rejects, even though footprint large and attached.
+        // Synthetic part: idle vs busy via cpu threshold
+        let ppid = HashMap::from([(101, 100)]);
+        let (states, foot, leaders, _) = idle_view(101, 'S', 600*1024, 0.0, false);
+        let mut busy_cpu = HashMap::new(); busy_cpu.insert(101, 0.5f32);
+        let view_busy = TreeView { root: 100, pids: &[101], states: &states, footprints: &foot, is_session_leader: &leaders, cpu_delta: &busy_cpu };
+        assert!(!is_idle_subtree(101, 100, &view_busy, &ppid), "watcher waiting on response is busy (50% cpu) — must never park");
+
+        // Real-FFI part: spawn busy loop vs sleep, prove cpu delta distinguishes
+        use crate::collector::snapshot_current_user;
+        use crate::cpu::CpuRing;
+        use std::process::{Command, Stdio};
+        use std::thread;
+        use std::time::Duration;
+        // busy spinner: python tight loop
+        let mut busy = Command::new("python3").args(["-c", "while True: pass"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+        let Ok(mut busy_child) = busy else { return; };
+        let busy_pid = busy_child.id() as i32;
+        let mut sleeper = Command::new("sleep").arg("2").stdout(Stdio::null()).stderr(Stdio::null()).spawn().expect("spawn sleep");
+        let sleep_pid = sleeper.id() as i32;
+        thread::sleep(Duration::from_millis(200));
+        let snap1 = snapshot_current_user();
+        let mut ring = CpuRing::new();
+        for proc in &snap1.procs { ring.update(proc.pid, proc.cpu_time_ns); }
+        // let busy burn some cpu
+        thread::sleep(Duration::from_millis(600));
+        let snap2 = snapshot_current_user();
+        let ppid2 = snap2.ppid_map();
+        let states2: HashMap<i32, char> = snap2.procs.iter().map(|p| (p.pid, p.state)).collect();
+        let mut foots: HashMap<i32, u64> = snap2.procs.iter().map(|p| (p.pid, p.footprint_kb)).collect();
+        foots.insert(busy_pid, 600*1024);
+        foots.insert(sleep_pid, 600*1024);
+        let leaders: HashMap<i32,bool> = HashMap::new();
+        let mut cpus: HashMap<i32,f32> = HashMap::new();
+        for proc in &snap2.procs { cpus.insert(proc.pid, ring.update(proc.pid, proc.cpu_time_ns)); }
+        let view2 = TreeView { root: std::process::id() as i32, pids: &[busy_pid, sleep_pid], states: &states2, footprints: &foots, is_session_leader: &leaders, cpu_delta: &cpus };
+        // busy should have high cpu delta, sleep near 0
+        let busy_idle = is_idle_subtree(busy_pid, std::process::id() as i32, &view2, &ppid2);
+        let sleep_idle = is_idle_subtree(sleep_pid, std::process::id() as i32, &view2, &ppid2);
+        let busy_cpu_val = cpus.get(&busy_pid).copied().unwrap_or(0.0);
+        let sleep_cpu_val = cpus.get(&sleep_pid).copied().unwrap_or(0.0);
+        assert!(!busy_idle, "busy spinner pid {busy_pid} cpu {busy_cpu_val:.3} must not be idle — would hang watcher");
+        assert!(sleep_idle, "sleep pid {sleep_pid} cpu {sleep_cpu_val:.3} should be idle");
+        let _ = busy_child.kill(); let _ = busy_child.wait();
+        let _ = sleeper.kill(); let _ = sleeper.wait();
+    }
+
 }
