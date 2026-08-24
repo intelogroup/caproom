@@ -1,3 +1,12 @@
+## 0.9.1 — 2026-08-24
+
+### Fixed
+- **Compiler warnings in test suite** — removed unused variables and unnecessary `mut` bindings in `caproom-core` policy tests.
+- **Missing test coverage across workspace** — added unit tests for `caproom-agents`, `caproom-core` (`process_tree`, `growth`, `cpu`, `pressure`, `collector`), `caproom-mcp`, and `cli` argument parsing.
+
+### Added
+- **9 new unit tests** — now `33` unit tests across the Rust workspace (agents adapters, tree building/root detection, snapshot helpers, growth/cpu ring pruning, MCP empty-pid top).
+- **`cargo clippy --workspace` and `cargo fmt --all` clean** — zero warnings and formatting drift.
 ## 0.9.0 — 2026-08-24
 
 ### Fixed

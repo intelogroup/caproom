@@ -125,7 +125,13 @@ fn snapshot_libproc() -> Option<Snapshot> {
 
     extern "C" {
         fn proc_listallpids(buffer: *mut c_void, buffersize: c_int) -> c_int;
-        fn proc_pidinfo(pid: c_int, flavor: c_int, arg: u64, buffer: *mut c_void, buffersize: c_int) -> c_int;
+        fn proc_pidinfo(
+            pid: c_int,
+            flavor: c_int,
+            arg: u64,
+            buffer: *mut c_void,
+            buffersize: c_int,
+        ) -> c_int;
         fn proc_pid_rusage(pid: c_int, flavor: c_int, buffer: *mut c_void) -> c_int;
         fn proc_pidpath(pid: c_int, buffer: *mut c_void, buffersize: u32) -> c_int;
     }
@@ -136,7 +142,8 @@ fn snapshot_libproc() -> Option<Snapshot> {
     let mut cap = 8192usize;
     let pids_buf = loop {
         let mut buf = vec![0i32; cap];
-        let count = unsafe { proc_listallpids(buf.as_mut_ptr() as *mut c_void, (buf.len() * 4) as c_int) };
+        let count =
+            unsafe { proc_listallpids(buf.as_mut_ptr() as *mut c_void, (buf.len() * 4) as c_int) };
         if count < 0 {
             return None;
         }
@@ -151,10 +158,18 @@ fn snapshot_libproc() -> Option<Snapshot> {
     let mut procs = Vec::with_capacity(pids_buf.len());
     let mut path_buf = vec![0u8; 4096];
     for pid in pids_buf {
-        if pid <= 1 { continue; }
+        if pid <= 1 {
+            continue;
+        }
         let mut bsd = MaybeUninit::<ProcBsdInfo>::uninit();
         let ret = unsafe {
-            proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, bsd.as_mut_ptr() as *mut c_void, std::mem::size_of::<ProcBsdInfo>() as c_int)
+            proc_pidinfo(
+                pid,
+                PROC_PIDTBSDINFO,
+                0,
+                bsd.as_mut_ptr() as *mut c_void,
+                std::mem::size_of::<ProcBsdInfo>() as c_int,
+            )
         };
         if ret != std::mem::size_of::<ProcBsdInfo>() as c_int {
             continue;
@@ -166,7 +181,10 @@ fn snapshot_libproc() -> Option<Snapshot> {
         let rret = unsafe { proc_pid_rusage(pid, RUSAGE_INFO_V4, ru.as_mut_ptr() as *mut c_void) };
         let (footprint_kb, cpu_time_ns) = if rret == 0 {
             let ru = unsafe { ru.assume_init() };
-            (ru.ri_phys_footprint / 1024, ru.ri_user_time + ru.ri_system_time)
+            (
+                ru.ri_phys_footprint / 1024,
+                ru.ri_user_time + ru.ri_system_time,
+            )
         } else {
             // fallback: try taskinfo resident_size, else skip
             const PROC_PIDTASKINFO: c_int = 4;
@@ -192,10 +210,21 @@ fn snapshot_libproc() -> Option<Snapshot> {
                 pti_priority: i32,
             }
             let mut ti = MaybeUninit::<ProcTaskInfo>::uninit();
-            let tret = unsafe { proc_pidinfo(pid, PROC_PIDTASKINFO, 0, ti.as_mut_ptr() as *mut c_void, std::mem::size_of::<ProcTaskInfo>() as c_int) };
+            let tret = unsafe {
+                proc_pidinfo(
+                    pid,
+                    PROC_PIDTASKINFO,
+                    0,
+                    ti.as_mut_ptr() as *mut c_void,
+                    std::mem::size_of::<ProcTaskInfo>() as c_int,
+                )
+            };
             if tret == std::mem::size_of::<ProcTaskInfo>() as c_int {
                 let ti = unsafe { ti.assume_init() };
-                (ti.pti_resident_size / 1024, ti.pti_total_user + ti.pti_total_system)
+                (
+                    ti.pti_resident_size / 1024,
+                    ti.pti_total_user + ti.pti_total_system,
+                )
             } else {
                 continue;
             }
@@ -206,9 +235,9 @@ fn snapshot_libproc() -> Option<Snapshot> {
         const PROC_PIDTASKINFO: c_int = 4;
         #[repr(C)]
         struct TaskRunState {
-            _pad: [u64; 2],   // virtual+resident size
-            _cpu: [u64; 2],   // total user+system
-            _thr: [u64; 2],   // threads user+system
+            _pad: [u64; 2], // virtual+resident size
+            _cpu: [u64; 2], // total user+system
+            _thr: [u64; 2], // threads user+system
             _policy: i32,
             _faults: [i32; 4],
             _msgs: [i32; 2],
@@ -219,10 +248,20 @@ fn snapshot_libproc() -> Option<Snapshot> {
             _prio: i32,
         }
         let mut tr = MaybeUninit::<TaskRunState>::uninit();
-        let trret = unsafe { proc_pidinfo(pid, PROC_PIDTASKINFO, 0, tr.as_mut_ptr() as *mut c_void, std::mem::size_of::<TaskRunState>() as c_int) };
+        let trret = unsafe {
+            proc_pidinfo(
+                pid,
+                PROC_PIDTASKINFO,
+                0,
+                tr.as_mut_ptr() as *mut c_void,
+                std::mem::size_of::<TaskRunState>() as c_int,
+            )
+        };
         let num_running = if trret == std::mem::size_of::<TaskRunState>() as c_int {
             unsafe { tr.assume_init().numrunning }
-        } else { -1 };
+        } else {
+            -1
+        };
 
         // state mapping: pbi_status 1=SIDL, 5=SZOMB, 4=SSTOP are trustworthy;
         // R/S decided by numrunning (0 threads on CPU => sleeping)
@@ -230,29 +269,51 @@ fn snapshot_libproc() -> Option<Snapshot> {
             5 => 'Z',
             4 => 'T',
             _ => {
-                if num_running < 0 { 'S' }      // taskinfo failed — assume sleeping
-                else if num_running > 0 { 'R' }
-                else { 'S' }
+                if num_running < 0 {
+                    'S'
+                }
+                // taskinfo failed — assume sleeping
+                else if num_running > 0 {
+                    'R'
+                } else {
+                    'S'
+                }
             }
         };
 
         // prefer proc_pidpath for full cmd, fallback to pbi_comm
-        let plen = unsafe { proc_pidpath(pid, path_buf.as_mut_ptr() as *mut c_void, path_buf.len() as u32) };
+        let plen = unsafe {
+            proc_pidpath(
+                pid,
+                path_buf.as_mut_ptr() as *mut c_void,
+                path_buf.len() as u32,
+            )
+        };
         let cmd = if plen > 0 {
             let cstr = unsafe { CStr::from_ptr(path_buf.as_ptr() as *const i8) };
             let s = cstr.to_string_lossy().into_owned();
             if s.is_empty() {
-                String::from_utf8_lossy(&bsd.pbi_comm).trim_end_matches('\0').to_string()
-            } else { s }
+                String::from_utf8_lossy(&bsd.pbi_comm)
+                    .trim_end_matches('\0')
+                    .to_string()
+            } else {
+                s
+            }
         } else {
-            String::from_utf8_lossy(&bsd.pbi_comm).trim_end_matches('\0').to_string()
+            String::from_utf8_lossy(&bsd.pbi_comm)
+                .trim_end_matches('\0')
+                .to_string()
         };
 
         // sid via getsid (session leader = pid == sid), start via pbi_start
         #[cfg(unix)]
         let sid = {
             let r = unsafe { libc::getsid(pid) };
-            if r < 0 { 0 } else { r as i32 }
+            if r < 0 {
+                0
+            } else {
+                r as i32
+            }
         };
         #[cfg(not(unix))]
         let sid: i32 = 0;
@@ -269,7 +330,11 @@ fn snapshot_libproc() -> Option<Snapshot> {
             cmd,
         });
     }
-    if procs.is_empty() { None } else { Some(Snapshot { procs }) }
+    if procs.is_empty() {
+        None
+    } else {
+        Some(Snapshot { procs })
+    }
 }
 
 /// Parse /proc/[pid]/stat: fields after the comm field (which may contain
@@ -286,7 +351,9 @@ fn parse_proc_stat(s: &str) -> (u64, u64, i32) {
         let sid_v: i32 = f[3].parse().unwrap_or(0);
         let start_v: u64 = f[19].parse().unwrap_or(0);
         ((ut + st) * 10_000_000, start_v, sid_v)
-    } else { (0, 0, 0) }
+    } else {
+        (0, 0, 0)
+    }
 }
 
 fn snapshot_ps() -> Snapshot {
@@ -294,15 +361,21 @@ fn snapshot_ps() -> Snapshot {
     let out = Command::new("ps")
         .args(["-eo", "pid=,ppid=,pgid=,rss=,state=,command="])
         .output();
-    let Ok(out) = out else { return Snapshot::default() };
+    let Ok(out) = out else {
+        return Snapshot::default();
+    };
     let text = String::from_utf8_lossy(&out.stdout);
     let mut procs = Vec::new();
     for line in text.lines() {
         let t = line.trim_start();
-        if t.is_empty() { continue; }
+        if t.is_empty() {
+            continue;
+        }
         // split_whitespace then re-join command tail
         let toks: Vec<&str> = t.split_whitespace().collect();
-        if toks.len() < 5 { continue; }
+        if toks.len() < 5 {
+            continue;
+        }
         let pid: i32 = toks[0].parse().unwrap_or(0);
         let ppid: i32 = toks[1].parse().unwrap_or(0);
         let pgid: i32 = toks[2].parse().unwrap_or(0);
@@ -311,13 +384,21 @@ fn snapshot_ps() -> Snapshot {
         // command is original line after the 5th token's position — recover verbatim tail
         let cmd = if toks.len() > 5 {
             toks[5..].join(" ")
-        } else { String::new() };
-        if pid == 0 { continue; }
+        } else {
+            String::new()
+        };
+        if pid == 0 {
+            continue;
+        }
         // Linux: derive cpu_time_ns + start_time + sid from /proc/[pid]/stat
         let (cpu_time_ns, start_time, sid) = {
             #[cfg(target_os = "linux")]
             {
-                match std::fs::read_to_string(format!("/proc/{}/stat", pid)).ok().as_deref().map(parse_proc_stat) {
+                match std::fs::read_to_string(format!("/proc/{}/stat", pid))
+                    .ok()
+                    .as_deref()
+                    .map(parse_proc_stat)
+                {
                     Some(t) => t,
                     None => (0, 0, 0),
                 }
@@ -334,7 +415,17 @@ fn snapshot_ps() -> Snapshot {
                 (0u64, 0u64, sid)
             }
         };
-        procs.push(ProcInfo { pid, ppid, pgid, sid, start_time, footprint_kb: rss, cpu_time_ns, state, cmd });
+        procs.push(ProcInfo {
+            pid,
+            ppid,
+            pgid,
+            sid,
+            start_time,
+            footprint_kb: rss,
+            cpu_time_ns,
+            state,
+            cmd,
+        });
     }
     Snapshot { procs }
 }
@@ -348,20 +439,61 @@ mod tests {
         // real entry point snapshot_current_user which prefers libproc on macOS.
         // This exercises the FFI path that real consumers use.
         let s = snapshot_current_user();
-        assert!(!s.procs.is_empty(), "snapshot_current_user empty — libproc and ps both failed");
+        assert!(
+            !s.procs.is_empty(),
+            "snapshot_current_user empty — libproc and ps both failed"
+        );
     }
     #[test]
     fn snapshot_current_user_has_ppid() {
         let s = snapshot_current_user();
-        assert!(s.procs.iter().any(|p| p.ppid != 0), "ppid_map should be populated");
+        assert!(
+            s.procs.iter().any(|p| p.ppid != 0),
+            "ppid_map should be populated"
+        );
     }
     #[test]
-    fn proc_stat_parses_session_not_tpgid() {        // synthetic stat line: comm contains spaces+parens to force rsplit path
+    fn proc_stat_parses_session_not_tpgid() {
+        // synthetic stat line: comm contains spaces+parens to force rsplit path
         // fields after ')': state=S ppid=100 pgrp=200 session=300 tty_nr=7 tpgid=400 ...
         let line = "1234 (my hog) S 100 200 300 7 400 4194560 1 0 0 0 5 3 0 0 0 0 0 0 123456789 0";
         let (cpu_ns, start, sid) = parse_proc_stat(line);
         assert_eq!(sid, 300, "session is f[3], not f[4] (tpgid)");
         assert_eq!(cpu_ns, (5 + 3) * 10_000_000);
         assert_eq!(start, 123456789);
+    }
+    #[test]
+    fn by_pid_and_ppid_map_deterministic() {
+        let s = Snapshot {
+            procs: vec![
+                ProcInfo {
+                    pid: 1,
+                    ppid: 0,
+                    pgid: 1,
+                    sid: 1,
+                    start_time: 0,
+                    footprint_kb: 0,
+                    cpu_time_ns: 0,
+                    state: 'S',
+                    cmd: "init".into(),
+                },
+                ProcInfo {
+                    pid: 2,
+                    ppid: 1,
+                    pgid: 2,
+                    sid: 2,
+                    start_time: 1,
+                    footprint_kb: 100,
+                    cpu_time_ns: 10_000_000,
+                    state: 'R',
+                    cmd: "child".into(),
+                },
+            ],
+        };
+        assert!(s.by_pid(1).is_some());
+        assert!(s.by_pid(99).is_none());
+        let m = s.ppid_map();
+        assert_eq!(m.get(&1), Some(&0));
+        assert_eq!(m.get(&2), Some(&1));
     }
 }

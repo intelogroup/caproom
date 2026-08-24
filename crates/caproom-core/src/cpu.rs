@@ -11,7 +11,11 @@ pub struct CpuRing {
 }
 
 impl CpuRing {
-    pub fn new() -> Self { Self { history: HashMap::new() } }
+    pub fn new() -> Self {
+        Self {
+            history: HashMap::new(),
+        }
+    }
 
     /// Update with current total cpu_time_ns, return fractional CPU (1.0 = 100% one core).
     /// First sample returns 1.0 (assume busy) to avoid parking active watcher on first sight;
@@ -21,7 +25,9 @@ impl CpuRing {
         let now = Instant::now();
         if let Some((prev_cpu, prev_t, prev_f)) = self.history.get(&pid).copied() {
             let dt = now.duration_since(prev_t).as_secs_f64();
-            if dt < 0.5 { return prev_f; }
+            if dt < 0.5 {
+                return prev_f;
+            }
             let delta = cpu_ns.saturating_sub(prev_cpu) as f64;
             let frac = (delta / 1e9) / dt;
             let clamped = frac.clamp(0.0, 8.0) as f32;
@@ -66,7 +72,7 @@ mod tests {
     fn cpu_idle_vs_busy() {
         let mut r = CpuRing::new();
         assert_eq!(r.update_with_dt(100, 0, Duration::from_secs(1)), 1.0); // first sight busy
-        // 10ms cpu in 1s = 1%
+                                                                           // 10ms cpu in 1s = 1%
         let f1 = r.update_with_dt(100, 10_000_000, Duration::from_secs(1));
         assert!((f1 - 0.01).abs() < 0.001, "got {f1}");
         // 500ms in 1s = 50%
@@ -81,5 +87,19 @@ mod tests {
         assert!(f < 0.02);
         let f2 = r.update_with_dt(1, 115_000_000, Duration::from_secs(1)); // +100ms =10% >2%
         assert!(f2 >= 0.02);
+    }
+    #[test]
+    fn prune_drops_history() {
+        let mut r = CpuRing::new();
+        r.update_with_dt(1, 0, Duration::from_secs(1));
+        r.update_with_dt(2, 0, Duration::from_secs(1));
+        r.prune(&[1]);
+        assert_eq!(r.get(1), 1.0);
+        assert_eq!(r.get(2), 0.0); // pruned -> default
+    }
+    #[test]
+    fn get_missing_defaults_zero() {
+        let r = CpuRing::new();
+        assert_eq!(r.get(999), 0.0);
     }
 }

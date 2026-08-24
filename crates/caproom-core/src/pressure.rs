@@ -24,7 +24,12 @@ pub fn free_mem_pct() -> u8 {
             .args(["-n", "hw.memsize"])
             .output()
             .ok()
-            .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u64>().ok())
+            .and_then(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .parse::<u64>()
+                    .ok()
+            })
             .unwrap_or(24 * 1024 * 1024 * 1024)
     });
 
@@ -41,10 +46,22 @@ pub fn free_mem_pct() -> u8 {
                 }
             }
             if line.contains("Pages free") {
-                free = line.split_whitespace().nth(2).unwrap_or("0").trim_matches('.').parse().unwrap_or(0);
+                free = line
+                    .split_whitespace()
+                    .nth(2)
+                    .unwrap_or("0")
+                    .trim_matches('.')
+                    .parse()
+                    .unwrap_or(0);
             }
             if line.contains("Pages inactive") {
-                inactive = line.split_whitespace().nth(2).unwrap_or("0").trim_matches('.').parse().unwrap_or(0);
+                inactive = line
+                    .split_whitespace()
+                    .nth(2)
+                    .unwrap_or("0")
+                    .trim_matches('.')
+                    .parse()
+                    .unwrap_or(0);
             }
         }
         let avail = (free + inactive) * page;
@@ -76,10 +93,18 @@ pub fn free_mem_pct() -> u8 {
     let mut total = 1u64;
     for line in meminfo.lines() {
         if line.starts_with("MemAvailable") {
-            avail = line.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            avail = line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
         }
         if line.starts_with("MemTotal") {
-            total = line.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(1);
+            total = line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1);
         }
     }
     let computed = ((avail * 100) / total) as u8;
@@ -130,5 +155,10 @@ mod tests {
         assert_eq!(effective_limit(4096, 35), 4096);
         assert_eq!(effective_limit(4096, 15), 4096);
         assert_eq!(effective_limit(4096, 0), 3276); // 0.8*4096 floor
+    }
+    #[test]
+    fn effective_limit_zero() {
+        assert_eq!(effective_limit(0, 0), 0);
+        assert_eq!(effective_limit(0, 15), 0);
     }
 }
