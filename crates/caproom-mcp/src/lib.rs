@@ -97,9 +97,20 @@ pub fn handle_park_tree(pid: i32) -> serde_json::Value {
     {
         let snap = caproom_core::collector::snapshot_current_user();
         if let Some(tree) = caproom_core::process_tree::Tree::build(pid, &snap) {
+            // PID reuse guard: skip pids whose start_time changed since snapshot
+            // (parity with cli cmd_park_tree)
             let mut parked = Vec::new();
             for p in &tree.pids {
-                if unsafe { libc::kill(*p, libc::SIGSTOP) } == 0 { parked.push(*p); }
+                if let Some(orig) = snap.by_pid(*p) {
+                    if orig.start_time != 0 {
+                        if let Some(cur) = caproom_core::collector::snapshot_current_user().by_pid(*p) {
+                            if cur.start_time != 0 && cur.start_time != orig.start_time {
+                                continue;
+                            }
+                        }
+                    }
+                    if unsafe { libc::kill(*p, libc::SIGSTOP) } == 0 { parked.push(*p); }
+                }
             }
             return serde_json::json!({"parked": parked, "tree_pid": pid, "tree_pids": tree.pids, "eligible_kb": tree.footprint_kb});
         } else {
