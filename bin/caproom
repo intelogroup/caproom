@@ -847,6 +847,7 @@ run_watchdog() {
   # the cap on the pty tree (same kill logic as normal).
   if [[ "$USE_PTY" -eq 1 ]]; then
     echo "caproom: pty mode — allocating pty via forkpty for '${1##*/}' (limit ${LIMIT_MB}m, verbatim forwarding)" >&2
+    stty -tostop 2>/dev/null || true
     printf '\033[?1049l\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?2004l\033[?25h' >/dev/tty 2>/dev/null || true
     local saved_stty=""
     if [[ -t 0 ]]; then
@@ -915,6 +916,7 @@ run_watchdog() {
     fi
     # Clean stale tty modes before handing off, same snapshot hygiene as
     # the normal watchdog path but without taking foreground away.
+    stty -tostop 2>/dev/null || true
     printf '\033[?1049l\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?2004l\033[?25h' >/dev/tty 2>/dev/null || true
     # Detached watchdog monitors the TUI's pid tree without owning stdio.
     # Resolve our own path (works via shim and direct invocation).
@@ -942,8 +944,9 @@ run_watchdog() {
   # Terminal hygiene: a TUI child (opencode, claude, ...) puts the tty in
   # raw + mouse-tracking mode. If WE kill it, it never restores, and the
   # user's shell then prints mouse reports like [[<35;25;15M as garbage.
-  # Clear any stale mode from a previous kill BEFORE snapshot, then snapshot
-  # the clean state so restore goes to sane, not back to garbage.
+  # Clear stale state before snapshot — disable tostop to avoid SIGTTOU suspend
+  # when caproom backgrounds the TUI (ghostty reports [[<... as suspended tty output).
+  stty -tostop 2>/dev/null || true
   printf '\033[?1049l\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?2004l\033[?25h' >/dev/tty 2>/dev/null || true
   local saved_stty=""
   if [[ -t 0 ]]; then
