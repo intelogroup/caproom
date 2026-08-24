@@ -1,3 +1,15 @@
+## 0.9.0 — 2026-08-24
+
+### Fixed
+- **Growth trigger contextual** — `should_enforce_growth` requires `70%` near-limit + `pressured<20%` + projected breach `<5min` (`600s` for `>1MB/s`) instead of bare `>200 KB/s` (`12 MB/min`). Prevents false kill on normal indexing/compiling.
+- **Pressure cached** — `hw.memsize OnceLock` + `free_pct 800ms/200ms` cache cuts `5 spawns/sec →1` in `200ms` watchdog.
+- **PID reuse guard + sid/start** — `ProcInfo` adds `sid` (`getsid`) + `start_time` (`pbi_start` / `/proc/starttime`) for `(pid,start)` identity. `is_session_leader` now `pid==sid` fallback `pid==pgid`, fixes `Ghostty→tmux` conflation. `TERM/KILL` and `park-tree` skip recycled pid.
+
+### Added
+- **`park-tree`/`wake-tree`** — tree-aware `SIGSTOP/CONT` (`Tree::build` + reuse guard) vs single `park/wake` mismatch (single stays, tree explicit).
+- **`caproomd v1.0 skeleton`** — single `200ms` collector for `N` sessions (`545K`), `risk = footprint*0.5 + growth*0.1 + pressure*10 + fanout*2 + urgency`, ranks worst → `park idle children` then `warn agent`. TODO `UDS /tmp/caproomd.sock` + `dispatch_source_memorypressure`.
+- **MCP tools** — `caproom-mcp` stdio server `8` typed tools (`top`, `park`, `park_tree`, `wake`, `wake_tree`, `run`, `freemem`, `status`) `710K`, `schema1` no `message` string, `initialize` + `tools/list/call` verified `363 procs` `park/wake` roundtrip. `package.json` bin `caproom`+`caproom-mcp`.
+
 ## 0.8.2 — 2026-08-24
 
 ### Fixed
