@@ -55,7 +55,6 @@ fn snapshot_libproc() -> Option<Snapshot> {
 
     const PROC_PIDTBSDINFO: c_int = 3;
     const RUSAGE_INFO_V4: c_int = 4;
-    const MAXCOMLEN: usize = 16;
 
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -202,12 +201,39 @@ fn snapshot_libproc() -> Option<Snapshot> {
             }
         };
 
-        // state mapping: pbi_status 1=SIDL, 2=SRUN, 3=SSLEEP, 4=SSTOP, 5=SZOMB
+        // R vs S: pbi_status lies — reports SRUN for processes blocked in
+        // mach_msg/time.sleep. Use TASKINFO's live thread-run count instead.
+        const PROC_PIDTASKINFO: c_int = 4;
+        #[repr(C)]
+        struct TaskRunState {
+            _pad: [u64; 2],   // virtual+resident size
+            _cpu: [u64; 2],   // total user+system
+            _thr: [u64; 2],   // threads user+system
+            _policy: i32,
+            _faults: [i32; 4],
+            _msgs: [i32; 2],
+            _sysc: [i32; 2],
+            _csw: i32,
+            threadnum: i32,
+            numrunning: i32,
+            _prio: i32,
+        }
+        let mut tr = MaybeUninit::<TaskRunState>::uninit();
+        let trret = unsafe { proc_pidinfo(pid, PROC_PIDTASKINFO, 0, tr.as_mut_ptr() as *mut c_void, std::mem::size_of::<TaskRunState>() as c_int) };
+        let num_running = if trret == std::mem::size_of::<TaskRunState>() as c_int {
+            unsafe { tr.assume_init().numrunning }
+        } else { -1 };
+
+        // state mapping: pbi_status 1=SIDL, 5=SZOMB, 4=SSTOP are trustworthy;
+        // R/S decided by numrunning (0 threads on CPU => sleeping)
         let state_char = match bsd.pbi_status {
-            2 => 'R',
             5 => 'Z',
             4 => 'T',
-            _ => 'S',
+            _ => {
+                if num_running < 0 { 'S' }      // taskinfo failed — assume sleeping
+                else if num_running > 0 { 'R' }
+                else { 'S' }
+            }
         };
 
         // prefer proc_pidpath for full cmd, fallback to pbi_comm
@@ -250,6 +276,7 @@ fn snapshot_libproc() -> Option<Snapshot> {
 /// spaces/parens — hence rsplit on ')'). Returns (cpu_time_ns, start_time, sid).
 /// Layout after ')': 0=state 1=ppid 2=pgrp 3=session 4=tty_nr 5=tpgid ...
 /// 11=utime 12=stime ... 19=starttime.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn parse_proc_stat(s: &str) -> (u64, u64, i32) {
     let after = s.rsplit(')').next().unwrap_or("");
     let f: Vec<&str> = after.split_whitespace().collect();
