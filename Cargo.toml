@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/caproom-core", "crates/caproom-agents", "crates/caproom-mcp", "crates/cli"]
+members = ["crates/caproom-core", "crates/caproom-agents", "crates/caproom-mcp", "crates/cli", "crates/caproom-daemon"]
 resolver = "2"
 
 [workspace.package]

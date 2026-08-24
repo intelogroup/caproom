@@ -90,6 +90,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "caproom-daemon"
+version = "0.8.2"
+dependencies = [
+ "caproom-core",
+ "libc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "caproom-mcp"
 version = "0.8.2"
 dependencies = [
