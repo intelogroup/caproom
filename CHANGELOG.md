@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.3 — 2026-08-24
+
+### Fixed
+- **TUI / pty leak (`#2`): `caproom -- opencode` (and `claude`, `vim`, `htop`, …) corrupted the terminal — `OSC 10/11` (`^[]10;rgb:...`), `DSR CPR` (`^[[5;1R`), and mouse `^[[<35;` reports leaked as text because the watchdog sat on stdio and stole foreground pgrp.** The watchdog now bypasses stdio when `[ -t 0 ] && [ -t 1 ]` for known TUIs: the TUI `exec`s directly and a detached `caproom watch --auto-park` monitors its pid tree (same cap, no pty corruption). Piped/batch `caproom -- opencode run "task"` stays fully capped via the watchdog. New flag `CAPROOM_BYPASS_TTY=1` / `--no-intercept-tty` forces bypass for any command. `caproom init <TUI>` now emits the tty-aware wrapper and warns on generation; `caproom --help` and `README` document the split modes. Verified via scratchpad harness `test/fake-tui.js` + `scripts/scratchpad-pty.sh` (hog/tree/stubborn still enforce, no orphans).
+
 ## 0.7.2 — 2026-08-23
 
 ### Fixed

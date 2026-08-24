@@ -51,8 +51,9 @@ caproom --limit 4096 --docker --image python:3.12-slim -- python train.py
 | `--docker` | off | opt in to the Docker cgroup backend instead of the default host-native watchdog |
 | `--image <name>` | `node:22-slim` | docker image used by the `--docker` backend |
 | `--force-watchdog` | — | legacy no-op; the watchdog IS the default. Accepted so existing scripts and `init` snippets keep working |
+| `--no-intercept-tty` | off | bypass stdio interposition for TUI/pty apps — `exec` directly and monitor via detached `watch --auto-park` (preserves `OSC 10/11`, `DSR CPR`, mouse `DEC 1003`) |
 
-Env var overrides: `CAPROOM_LIMIT_MB`, `CAPROOM_IMAGE`, `CAPROOM_INTERVAL`, `CAPROOM_GRACE`.
+Env var overrides: `CAPROOM_LIMIT_MB`, `CAPROOM_IMAGE`, `CAPROOM_INTERVAL`, `CAPROOM_GRACE`, `CAPROOM_BYPASS_TTY=1` (force bypass, same as `--no-intercept-tty`).
 
 On cap breach, the watchdog backend sends `SIGTERM` first and waits `--grace` seconds before `SIGKILL`. If the process exits cleanly during the grace window, `caproom` propagates its real exit code; only a hard `SIGKILL` (process ignored `SIGTERM`, or grace ran out) reports `137` (same convention as Docker's own OOM-kill exit code, which the docker backend always uses on breach since Docker itself sends the kill).
 
@@ -93,6 +94,8 @@ caproom init claude --limit 6144 --grace 10 >> ~/.zshrc && source ~/.zshrc
 ```
 
 This appends a shell function that wraps `claude` through the watchdog backend (host-native — no Docker isolation, so the wrapped command keeps its normal filesystem/auth/PATH access) and an alias so plain `claude` picks it up. Per-shell override without editing the rc file: `CAPROOM_LIMIT_MB=8192 claude ...`. Works for any command, not just `claude` — `caproom init npm --limit 2048` wraps `npm` the same way.
+
+**TUI / pty note:** `caproom -- <TUI>` (opencode, claude, vim, htop, …) would break the pty — `OSC 10/11` (`^[]10;rgb:...`), `DSR CPR` (`^[[5;1R`), and mouse `^[[<35;` reports leak as text. Since 0.7.3, `caproom` detects `[ -t 0 ] && [ -t 1 ]` for known TUIs and **bypasses stdio interposition**: the TUI `exec`s directly and a detached `caproom watch --auto-park` monitors its pid tree (same cap, no pty corruption). Piped/batch `caproom -- opencode run "task"` stays fully capped via the watchdog. Override: `CAPROOM_BYPASS_TTY=1` / `--no-intercept-tty` forces bypass for any command; `CAPROOM_BYPASS_TTY=0` forces legacy pipe mode. `caproom init <TUI>` prints a warning and emits the tty-aware wrapper.
 
 ## setup / bind — shell integration for every terminal
 
