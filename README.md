@@ -115,8 +115,10 @@ One row per tree root; `park_candidate` is heuristic (`state running` + sleeping
 ## park / wake — reclaim idle memory without killing
 
 ```
-caproom park <pid>   # SIGSTOP — PID/ state kept, not scheduled, pages eligible for kernel compressor
-caproom wake <pid>   # SIGCONT — resumes instantly
+caproom park <pid>        # SIGSTOP — single PID, pages eligible for kernel compressor
+caproom park-tree <pid>   # SIGSTOP whole tree (recursive Tree::build) — PID reuse guarded (pid,start)
+caproom wake <pid>        # SIGCONT single
+caproom wake-tree <pid>   # SIGCONT whole tree
 ```
 
 Verified on macOS: parked RSS dropped `~90%` (345MB → 37MB) once real pressure hit. No reclaim while system idle/unpressured — rides kernel compressor, doesn't force. **Caveat:** parked process does zero work while stopped — only park something actually idle (watcher, finished subprocess), never the process an agent is waiting on.
@@ -138,7 +140,9 @@ Same `run`/`top`/`park`/`wake` via `cfg(unix)`/`cfg(windows)` guards (`cargo che
 ## Rust port status (current `main` 0.8.2)
 
 - ✅ `phys_footprint` via libproc `13ms` vs `ps` `20ms`, typed `top --json` with `growth_kb_s`/`reason_code`/`free_pct`
-- ✅ `is_idle_subtree` ancestry walk + `cpu_delta` (`CpuRing`) + `is_session_leader` (`pgid == pid`) wired, `S|I` gate dropped, `22` tests including `real_ffi_snapshot_hit`, `real_ffi_multithreaded_state_is_r_but_still_parks`, `park_does_not_hang_active_watcher`
+- ✅ `is_idle_subtree` ancestry walk + `cpu_delta` (`CpuRing` first-sample busy) + `is_session_leader` (`pid==sid` + `pid==pgid` fallback) wired, `S|I` gate dropped, `23` tests incl. `park_does_not_hang_active_watcher`
+- ✅ `growth` contextual `should_enforce_growth` (70% + pressure + <5min breach, 600s for >1MB/s) not bare `>200 KB/s`; `pressure` cached `hw.memsize OnceLock` + `free 800ms/200ms`
+- ✅ `park-tree`/`wake-tree` tree-aware + `(pid,start_time)` reuse guard (`pbi_start` / `/proc/starttime` via `getsid`), `is_session_leader` fixes `Ghostty→tmux` conflation
 - ✅ `effective_limit = limit * (80 + 20*free_pct/15)/100` pressure-aware threshold
 - ❌ Not yet: `dispatch_source_memorypressure` event-driven (polling-only v1), `rmcp` port, daemon+arbiter. See `docs/plan-caproom-rust.md` for reality vs pitch.
 
