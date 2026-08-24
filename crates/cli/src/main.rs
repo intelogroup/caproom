@@ -283,7 +283,12 @@ fn cmd_run(cmd: Vec<String>, limit_mb: u64, interval: f64, grace: u64) {
                 }).collect();
                 let cpu: HashMap<i32,f32> = {
                     let mut ring = cli_cpu().lock().unwrap();
-                    snap.procs.iter().map(|p| (p.pid, ring.update(p.pid, p.cpu_time_ns))).collect()
+                    snap.procs.iter().map(|p| {
+                        // cpu_time_ns == 0 means unknown (ps fallback path) — treat as
+                        // busy so an unmeasured process is never parked on bad data
+                        let d = if p.cpu_time_ns == 0 { 1.0 } else { ring.update(p.pid, p.cpu_time_ns) };
+                        (p.pid, d)
+                    }).collect()
                 };
                 let view = TreeView{ root: pid, pids: &tree.pids, states: &states, footprints: &foot, is_session_leader: &leaders, cpu_delta: &cpu };
                 let idle: Vec<i32> = tree.pids.iter().copied().filter(|p| is_idle_subtree(*p, pid, &view, &ppid_map)).collect();

@@ -131,16 +131,25 @@ fn snapshot_libproc() -> Option<Snapshot> {
         fn proc_pidpath(pid: c_int, buffer: *mut c_void, buffersize: u32) -> c_int;
     }
 
-    // 1. list all pids — returns count, not bytes (empirically 698 vs ps 695)
-    let mut pids_buf = vec![0i32; 8192];
-    let count = unsafe { proc_listallpids(pids_buf.as_mut_ptr() as *mut c_void, (pids_buf.len() * 4) as c_int) };
-    if count <= 0 {
-        return None;
-    }
-    let n = count as usize;
-    pids_buf.truncate(n);
+    // 1. list all pids — returns count, not bytes (empirically 698 vs ps 695).
+    // Grow-and-retry: a full system can exceed any fixed guess; truncation would
+    // silently drop trees from enforcement.
+    let mut cap = 8192usize;
+    let pids_buf = loop {
+        let mut buf = vec![0i32; cap];
+        let count = unsafe { proc_listallpids(buf.as_mut_ptr() as *mut c_void, (buf.len() * 4) as c_int) };
+        if count < 0 {
+            return None;
+        }
+        let n = count as usize;
+        if n < cap {
+            buf.truncate(n);
+            break buf;
+        }
+        cap *= 2;
+    };
 
-    let mut procs = Vec::with_capacity(n);
+    let mut procs = Vec::with_capacity(pids_buf.len());
     let mut path_buf = vec![0u8; 4096];
     for pid in pids_buf {
         if pid <= 1 { continue; }
