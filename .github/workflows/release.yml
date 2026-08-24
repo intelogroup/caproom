@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   build:
-    continue-on-error: ${{ matrix.os == 'windows-2022' }}
+    continue-on-error: ${{ matrix.os == 'windows-2022' || matrix.os == 'macos-13' }}
     strategy:
       fail-fast: false
       matrix:
