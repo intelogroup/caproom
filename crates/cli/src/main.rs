@@ -4,6 +4,13 @@ use std::collections::HashMap;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 
+/// Poll interval seconds — negative or zero would panic Duration::from_millis
+fn parse_interval(s: &str) -> Result<f64, String> {
+    let v: f64 = s.parse().map_err(|e| format!("invalid interval: {}", e))?;
+    if v <= 0.0 { return Err("interval must be > 0".into()); }
+    Ok(v)
+}
+
 #[derive(Parser)]
 #[command(name="caproom", version, about="Memory-cap any command — Rust CLI-first v1")]
 struct Cli {
@@ -13,7 +20,7 @@ struct Cli {
     #[arg(long, default_value="4096", global=true)]
     limit: u64,
     /// poll interval seconds
-    #[arg(long, default_value="0.2", global=true)]
+    #[arg(long, default_value="0.2", global=true, value_parser=parse_interval)]
     interval: f64,
     /// grace seconds after SIGTERM before SIGKILL
     #[arg(long, default_value="5", global=true)]
