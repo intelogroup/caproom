@@ -1,0 +1,9 @@
+[package]
+name = "caproom-agents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+caproom-core = { path = "../caproom-core" }
+serde = { workspace = true }

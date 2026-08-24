@@ -1,0 +1,14 @@
+[package]
+name = "caproom-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+nix = { workspace = true }
+libc = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# no extra deps — uses libc + nix FFI directly

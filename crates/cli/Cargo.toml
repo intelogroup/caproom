@@ -1,0 +1,15 @@
+[package]
+name = "caproom"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Memory-cap any command — Rust port, CLI-first v1"
+
+[dependencies]
+caproom-core = { path = "../caproom-core" }
+caproom-agents = { path = "../caproom-agents" }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+nix = { workspace = true }
+libc = { workspace = true }

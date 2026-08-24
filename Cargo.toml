@@ -1,0 +1,16 @@
+[workspace]
+members = ["crates/caproom-core", "crates/caproom-agents", "crates/cli"]
+resolver = "2"
+
+[workspace.package]
+version = "0.7.6"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/intelogroup/caproom"
+
+[workspace.dependencies]
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+nix = { version = "0.28", features = ["process", "signal"] }
+libc = "0.2"
