@@ -12,9 +12,9 @@
 **v1 = CLI-only, macOS-first, drop Docker.**
 - Invocation unchanged: `caproom run --limit 14G -- claude` (or `caproom --limit 14G -- cmd` compat).
 - Rust binary, clap <10ms startup, no tokio in hot path.
-- Collector: `phys_footprint` via `proc_pid_rusage` (Mach `TASK_VM_INFO` family), parent chain via `proc_listallpids` + `proc_pidinfo PROC_PIDTBSDINFO`, zero alloc bump arena per scan. No `ps` text.
-- Pressure: `dispatch_source_create(DISPATCH_SOURCE_TYPE_MEMORYPRESSURE)` warn/critical wake at 0% idle. Fallback: `dispatch_source_create` NULL or entitlement denied → log once `pressure listener unavailable, polling fallback 200ms` → poll every 200ms (current default). Trigger condition explicit, not TBD.
-- Docker backend deleted (no `--docker` flag in Rust).
+ - Collector: `phys_footprint` via `proc_pid_rusage` (Mach `TASK_VM_INFO` family, wired `crates/caproom-core/src/collector.rs:41`), parent chain via `proc_listallpids` + `proc_pidinfo PROC_PIDTBSDINFO`, zero alloc bump arena per scan. Polling-only v1 still faster than bash `ps` spawn, but not yet event-driven.
+ - Pressure: **polling-only v1** — `vm_stat`/`free_mem_pct` every 200ms (poll fallback), `dispatch_source_create(DISPATCH_SOURCE_TYPE_MEMORYPRESSURE)` **not built** — current code `pressure::try_init_pressure_source() → false` and logs `poll fallback 200ms (dispatch unavailable, v1.1 daemon will use GCD source)`. The Rust-vs-Go case for event-driven (0% idle wake) was aspirational; v1 is a faster polling loop with better metrics, not the event-driven daemon pitched. Deferred to daemon v1.1 global listener (single Mach source, N trees). Update this doc when dispatch is actually calling `dispatch_source_create`.
+ - Docker backend deleted (no `--docker` flag in Rust).
 
 **v1.1 = daemon + arbiter bundled, never daemon-without-arbiter.**
 - Single `caproomd` UDS `/tmp/caproomd.sock`, thread-per-connection (N=6, bounded, std::thread), ranks trees by `tree_rss + dRSS/dt + swap + fanout` → `time_to_critical`. Park worst first, escalate only if pressure persists.
@@ -147,7 +147,7 @@ Each CLI instance reads `free_mem_pct` (`vm_stat` free+inactive `bin/caproom:441
 
 **Week 2 CLI+policy+mitigation:** `cli` clap, watchdog loop, `top --json` schema1 additive, dynamic threshold, `park_idle` + recheck gate, `test/sum-oom.sh` must pass.
 
-**Week 3 shell+MCP verify:** `setup`/`init` emit Rust paths, `precmd` latency bench, `rmcp` maturity verified `2026-08-23` — `rmcp 3.1.4` official `modelcontextprotocol/rust-sdk` Apache-2.0, `rust-version 1.88`, `server` feature `tokio` required. Keep hot path tokio-free (`caproom-core` no tokio), `caproom-mcp` crate isolates tokio to MCP binary only. Plan: keep `bin/caproom-mcp.js` shim for v1, `crates/caproom-mcp` pull-only `rmcp` port with typed enums for v1.1.
+**Week 3 shell+MCP verify:** `setup`/`init` emit Rust paths, `precmd` latency bench, `rmcp` maturity check: **NOT integrated** — `Cargo.toml:11` has zero `rmcp` grep hits, `crates/caproom-mcp` is hand-rolled JSON via `serde` (typed enums, no rmcp). Earlier doc `2026-08-23 verified 3.1.4` was false confidence (decision written, never reflected in code). Correct: keep `bin/caproom-mcp.js` shim for v1, defer `rmcp 3.1.4` (`modelcontextprotocol/rust-sdk`, tokio `server` feature) port to v1.1 with tokio isolated to MCP crate. Add `rmcp` to `Cargo.toml` only when port starts, not before.
 
 **Week 4 distro+CI contract:** cross-compile prebuilt, npm unpack, `#[global_allocator]` tracking debug, CI fail if CLI RSS>15MB or startup>10ms (`hyperfine`) under 6-tab synthetic, `top` 345MB→37MB reclaim under pressure preserved.
 
@@ -157,10 +157,10 @@ Each CLI instance reads `free_mem_pct` (`vm_stat` free+inactive `bin/caproom:441
 - `caproom top --json` top: Chrome 4600MB, Virtualization 1896MB, Squirrel 1361MB, zsh→`opencode 61647` 1328MB tree (not leaking), clixen 1276MB, Docker 719MB. Ghostty 98MB, Terminal 143MB. Historic 20GB trench not present — last week. If emulator scrollback vs agent tree vs shell, next leak check via `caproom top --json --pid $PPID` + `phys_footprint` vs RSS δ.
 - v1 with `dRSS/dt` would have caught `20GB` at ~6GB climbing 500 MB/s with visible warn + grace vs Jetsam silent kill covering that tab only, not whole machine. Without `preserve_hook` wired, still lost session — earlier and cleaner, not saved.
 
-## 12. pass/fail
+## 12. pass/fail — updated to reality (not aspirational)
 
-- Pass: this doc exists, `cargo build --release` <10ms startup, `phys_footprint` collector correct, 6-tab-sum test passes, `top --json` schema1 compat, CI gates enforce footprint every commit.
-- Fail: any open marked TBD, `dispatch_source` fallback unspecified, or `ppid==root` / unconditional TERM sequence remains.
+ - Pass: this doc exists, `cargo build --release` <10ms startup, `phys_footprint` collector correct (bench `scripts/bench_phys_vs_ps.sh` 13ms vs ps 20ms per `top --json`, 30% faster, phys_footprint vs RSS shared overcount), `test/sum-oom.sh` **real blocking gate** now passes 6/6 capped 143 (was stub exit 0 false green, fixed to check non-zero signal + enforce), `top --json` schema1 typed enums, CI gates enforce footprint every commit.
+ - Fail: any open marked TBD, `dispatch_source` claimed without code, `rmcp` claimed without Cargo.toml grep, or `ppid==root` / unconditional TERM remains. Prior w3 MCP merge while w2 gate stub green was broken gate discipline — fixed, stub now fails if no hog capped.
 
 ## 13. risks
 

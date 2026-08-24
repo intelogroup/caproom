@@ -1,6 +1,7 @@
 use caproom_core::{collector, growth, pressure, process_tree::Tree, policy::{is_idle_subtree, TreeView}};
 use clap::{Parser, Subcommand};
 use std::collections::HashMap;
+use std::os::unix::process::ExitStatusExt;
 
 #[derive(Parser)]
 #[command(name="caproom", version, about="Memory-cap any command — Rust CLI-first v1")]
@@ -160,7 +161,8 @@ fn cmd_run(cmd: Vec<String>, limit_mb: u64, interval: f64, grace: u64) {
     loop {
         std::thread::sleep(interval_d);
         if let Ok(Some(status)) = child.try_wait() {
-            std::process::exit(status.code().unwrap_or(0));
+            let code = status.code().or_else(|| status.signal().map(|s| 128 + s)).unwrap_or(0);
+            std::process::exit(code);
         }
         let snap = collector::snapshot_current_user();
         let ppid_map = snap.ppid_map();
@@ -201,14 +203,21 @@ fn cmd_run(cmd: Vec<String>, limit_mb: u64, interval: f64, grace: u64) {
                 while waited < grace {
                     std::thread::sleep(std::time::Duration::from_secs(1));
                     waited += 1;
-                    if let Ok(Some(s)) = child.try_wait() { std::process::exit(s.code().unwrap_or(0)); }
+                    if let Ok(Some(s)) = child.try_wait() {
+                        let code = s.code().or_else(|| s.signal().map(|sig| 128 + sig)).unwrap_or(0);
+                        std::process::exit(code);
+                    }
                 }
                 for p in &tree.pids { unsafe { libc::kill(*p, libc::SIGKILL); } }
-                let _ = child.wait();
-                std::process::exit(137);
+                let status = child.wait().unwrap();
+                let code = status.code().or_else(|| status.signal().map(|sig| 128 + sig)).unwrap_or(137);
+                std::process::exit(code);
             }
         } else {
-            if let Ok(Some(s)) = child.try_wait() { std::process::exit(s.code().unwrap_or(0)); }
+            if let Ok(Some(s)) = child.try_wait() {
+                let code = s.code().or_else(|| s.signal().map(|sig| 128 + sig)).unwrap_or(0);
+                std::process::exit(code);
+            }
             // root reparented / escaped — exit cleanly, don't kill unrelated
             break;
         }
