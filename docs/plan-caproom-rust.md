@@ -71,6 +71,8 @@ effective_limit = min(limit, limit * (0.8 + 0.2*free_pct/15)) // free_pct from v
 
 `free_pct` lowers trigger point under pressure but does NOT change action set — more alert, not more aggressive against root.
 
+**History ring:** `crates/caproom-core/src/growth.rs:1` `GrowthRing` per-process EWMA `(prev*2+raw)/3`, `update(pid, footprint_kb)` with `<0.5s` de-dupe, `prune_stale`. CLI-first: each `caproom run` watchdog persists ring for its watched tree, so `growth_kb_s >200` triggers kill; `top --json` single-shot `growth_kb_s` is per-process and returns `0` on first call (no prior sample) — real velocity requires `watch` loop or same-process polling, not cross-invocation file. Daemon v1.1 will share ring via UDS.
+
 ### 3.3 escalation fix #2: recheck gate
 
 Park and TERM act on different targets (children vs root). No fallback without resample would kill healthy root after freeing memory.
@@ -145,7 +147,7 @@ Each CLI instance reads `free_mem_pct` (`vm_stat` free+inactive `bin/caproom:441
 
 **Week 2 CLI+policy+mitigation:** `cli` clap, watchdog loop, `top --json` schema1 additive, dynamic threshold, `park_idle` + recheck gate, `test/sum-oom.sh` must pass.
 
-**Week 3 shell+MCP verify:** `setup`/`init` emit Rust paths, `precmd` latency bench, `rmcp` crate maturity check (version, last publish, issues) — fallback keep `bin/caproom-mcp.js` shim one release if thin.
+**Week 3 shell+MCP verify:** `setup`/`init` emit Rust paths, `precmd` latency bench, `rmcp` maturity verified `2026-08-23` — `rmcp 3.1.4` official `modelcontextprotocol/rust-sdk` Apache-2.0, `rust-version 1.88`, `server` feature `tokio` required. Keep hot path tokio-free (`caproom-core` no tokio), `caproom-mcp` crate isolates tokio to MCP binary only. Plan: keep `bin/caproom-mcp.js` shim for v1, `crates/caproom-mcp` pull-only `rmcp` port with typed enums for v1.1.
 
 **Week 4 distro+CI contract:** cross-compile prebuilt, npm unpack, `#[global_allocator]` tracking debug, CI fail if CLI RSS>15MB or startup>10ms (`hyperfine`) under 6-tab synthetic, `top` 345MB→37MB reclaim under pressure preserved.
 

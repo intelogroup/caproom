@@ -30,6 +30,11 @@ pub struct TopResponse {
     pub processes: Vec<TopProcess>,
 }
 
+static GROWTH: std::sync::OnceLock<std::sync::Mutex<caproom_core::growth::GrowthRing>> = std::sync::OnceLock::new();
+fn growth_ring() -> &'static std::sync::Mutex<caproom_core::growth::GrowthRing> {
+    GROWTH.get_or_init(|| std::sync::Mutex::new(caproom_core::growth::GrowthRing::new()))
+}
+
 /// Pull-only MCP tools: top, park, wake. watch_* deferred to v1.1 (rmcp port).
 /// No push notifications — see skills/caproom-memory/SKILL.md.
 pub fn handle_top(pid: Option<i32>) -> TopResponse {
@@ -37,18 +42,28 @@ pub fn handle_top(pid: Option<i32>) -> TopResponse {
     let free_pct = caproom_core::pressure::free_mem_pct();
     let roots = if let Some(p) = pid { vec![p] } else { caproom_core::process_tree::Tree::roots(&snap) };
     let mut processes = Vec::new();
+    let mut ring = growth_ring().lock().unwrap();
     for r in roots {
         if let Some(t) = caproom_core::process_tree::Tree::build(r, &snap) {
             let state = match t.state { 'T' => State::Parked, 'Z' => State::Zombie, _ => State::Running };
             let is_sleeping = matches!(t.state, 'S' | 'I');
             let park_candidate = state == State::Running && is_sleeping && t.footprint_kb >= 512*1024;
-            let reason_code = if park_candidate { ReasonCode::ParkIdle } else { ReasonCode::None };
+            let growth_kb_s = ring.update(r, t.footprint_kb);
+            let reason_code = match caproom_core::growth::reason_code(park_candidate, growth_kb_s, free_pct) {
+                "PARK_IDLE" => ReasonCode::ParkIdle,
+                "GROWTH_RATE" => ReasonCode::GrowthRate,
+                "PRESSURE" => ReasonCode::Pressure,
+                _ => ReasonCode::None,
+            };
             processes.push(TopProcess{
                 pid: r, cmd: t.cmd, tree_rss_kb: t.footprint_kb, footprint_kb: t.footprint_kb,
-                tree_pids: t.pids, state, reason_code, growth_kb_s: 0, free_pct, park_candidate,
+                tree_pids: t.pids, state, reason_code, growth_kb_s, free_pct, park_candidate,
             });
         }
     }
+    // prune stale after
+    let ids: Vec<i32> = processes.iter().map(|p| p.pid).collect();
+    ring.prune_stale(&ids);
     processes.sort_by(|a,b| b.tree_rss_kb.cmp(&a.tree_rss_kb));
     TopResponse{ schema: 1, ts: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(), limit_mb_default: 4096, processes }
 }

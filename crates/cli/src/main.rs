@@ -1,4 +1,4 @@
-use caproom_core::{collector, pressure, process_tree::Tree, policy::{is_idle_subtree, TreeView}};
+use caproom_core::{collector, growth, pressure, process_tree::Tree, policy::{is_idle_subtree, TreeView}};
 use clap::{Parser, Subcommand};
 use std::collections::HashMap;
 
@@ -54,6 +54,10 @@ fn main() {
     }
 }
 
+static CLI_GROWTH: std::sync::OnceLock<std::sync::Mutex<growth::GrowthRing>> = std::sync::OnceLock::new();
+fn cli_growth() -> &'static std::sync::Mutex<growth::GrowthRing> {
+    CLI_GROWTH.get_or_init(|| std::sync::Mutex::new(growth::GrowthRing::new()))
+}
 fn cmd_top(json: bool, filter_pid: Option<i32>, park_min_mb: u64) {
     let snap = collector::snapshot_current_user();
     let ppid_map = snap.ppid_map();
@@ -64,28 +68,33 @@ fn cmd_top(json: bool, filter_pid: Option<i32>, park_min_mb: u64) {
         Tree::roots(&snap)
     };
     let park_min_kb = park_min_mb * 1024;
+    let free_pct = pressure::free_mem_pct();
     #[derive(serde::Serialize)]
-    struct ProcJson { pid: i32, cmd: String, tree_rss_kb: u64, tree_pids: Vec<i32>, state: String, park_candidate: bool, reason: String }
+    struct ProcJson { pid: i32, cmd: String, tree_rss_kb: u64, footprint_kb: u64, tree_pids: Vec<i32>, state: String, reason_code: String, growth_kb_s: i64, free_pct: u8, park_candidate: bool, reason: String }
     let mut out: Vec<ProcJson> = Vec::new();
+    let mut ring = cli_growth().lock().unwrap();
     for r in roots {
         if let Some(t) = Tree::build(r, &snap) {
             let state = match t.state { 'T' => "parked", 'Z' => "zombie", _ => "running" };
             let is_sleeping = matches!(t.state, 'S' | 'I');
             let cand = state=="running" && is_sleeping && t.footprint_kb >= park_min_kb;
+            let growth_kb_s = ring.update(r, t.footprint_kb);
+            let reason_code = growth::reason_code(cand, growth_kb_s, free_pct).to_string();
             let reason = if cand { format!("root sleeping + tree_rss {}KB >= {}KB park threshold", t.footprint_kb, park_min_kb) } else { String::new() };
-            // refine with ancestry walk for multi-level idle check (informational)
-            // fix #1: verify tree still attached
             let _attached = t.pids.iter().all(|p| caproom_core::policy::still_in_tree(*p, r, &ppid_map));
-            out.push(ProcJson{ pid: r, cmd: t.cmd, tree_rss_kb: t.footprint_kb, tree_pids: t.pids, state: state.to_string(), park_candidate: cand, reason });
+            out.push(ProcJson{ pid: r, cmd: t.cmd.clone(), tree_rss_kb: t.footprint_kb, footprint_kb: t.footprint_kb, tree_pids: t.pids, state: state.to_string(), reason_code, growth_kb_s, free_pct, park_candidate: cand, reason });
         }
     }
+    let ids: Vec<i32> = out.iter().map(|p| p.pid).collect();
+    ring.prune_stale(&ids);
+    drop(ring);
     out.sort_by(|a,b| b.tree_rss_kb.cmp(&a.tree_rss_kb));
     if json {
         let v = serde_json::json!({"schema":1,"ts": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(), "limit_mb_default": 4096, "processes": out});
         println!("{}", serde_json::to_string(&v).unwrap());
     } else {
         println!("{:<8} {:>10} {:<8} {:<9} {}", "PID", "TREE_MB", "STATE", "PIDS", "COMMAND");
-        for p in out { println!("{:<8} {:>10} {:<8} {:<9} {}", p.pid, p.tree_rss_kb/1024, p.state, p.tree_pids.len(), &p.cmd[..p.cmd.len().min(60)]); }
+        for p in &out { println!("{:<8} {:>10} {:<8} {:<9} {}", p.pid, p.tree_rss_kb/1024, p.state, p.tree_pids.len(), &p.cmd[..p.cmd.len().min(60)]); }
     }
 }
 
@@ -123,7 +132,13 @@ fn cmd_run(cmd: Vec<String>, limit_mb: u64, interval: f64, grace: u64) {
         if let Some(tree) = Tree::build(pid, &snap) {
             let free = pressure::free_mem_pct();
             let eff_kb = pressure::effective_limit(limit_mb, free) * 1024;
-            let growth_trigger = false; // dRSS/dt wired next: requires history ring
+            // growth trigger via shared history ring (same as MCP): >200 KB/s sustained
+            let growth_kb_s = {
+                let mut rg = cli_growth().lock().unwrap();
+                let g = rg.update(pid, tree.footprint_kb);
+                g
+            };
+            let growth_trigger = growth_kb_s > 200;
             if tree.footprint_kb >= eff_kb || growth_trigger {
                 // fix #2: park idle subtrees → resample → only TERM if still over
                 let states: HashMap<i32,char> = snap.procs.iter().map(|p| (p.pid, p.state)).collect();

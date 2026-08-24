@@ -1,4 +1,5 @@
 pub mod collector;
+pub mod growth;
 pub mod pressure;
 pub mod process_tree;
 pub mod policy;
