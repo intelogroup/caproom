@@ -3,13 +3,16 @@
   "version": "0.8.2",
   "description": "Memory-cap any command (AI coding agents, builds, background jobs) on macOS, Linux, and Windows \u2014 real enforcement via Docker cgroups, Windows Job Objects, or a polling watchdog, plus park/wake to reclaim idle process memory without killing.",
   "bin": {
-    "caproom": "bin/caproom-rs"
+    "caproom": "bin/caproom-rs",
+    "caproom-mcp": "bin/caproom-mcp"
   },
   "files": [
     "bin/caproom-rs",
     "bin/caproom-rs.exe",
     "prebuilt/*",
-    "scripts/pty_wrapper.py"
+    "scripts/pty_wrapper.py",
+    "bin/caproom-mcp",
+    "bin/caproom-mcp.exe"
   ],
   "keywords": [
     "memory",

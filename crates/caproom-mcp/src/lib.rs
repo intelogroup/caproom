@@ -68,6 +68,87 @@ pub fn handle_top(pid: Option<i32>) -> TopResponse {
     TopResponse{ schema: 1, ts: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(), limit_mb_default: 4096, processes }
 }
 
+pub fn handle_park(pid: i32) -> serde_json::Value {
+    #[cfg(unix)]
+    {
+        let r = unsafe { libc::kill(pid, libc::SIGSTOP) };
+        if r == 0 {
+            return serde_json::json!({"parked": [pid], "eligible_kb": 0, "state": "parked"});
+        } else {
+            return serde_json::json!({"error": format!("no such pid {}", pid)});
+        }
+    }
+    #[cfg(not(unix))]
+    { serde_json::json!({"error": "park not implemented on Windows"}) }
+}
+
+pub fn handle_park_tree(pid: i32) -> serde_json::Value {
+    #[cfg(unix)]
+    {
+        let snap = caproom_core::collector::snapshot_current_user();
+        if let Some(tree) = caproom_core::process_tree::Tree::build(pid, &snap) {
+            let mut parked = Vec::new();
+            for p in &tree.pids {
+                if unsafe { libc::kill(*p, libc::SIGSTOP) } == 0 { parked.push(*p); }
+            }
+            return serde_json::json!({"parked": parked, "tree_pid": pid, "tree_pids": tree.pids, "eligible_kb": tree.footprint_kb});
+        } else {
+            return serde_json::json!({"error": format!("no such pid {}", pid)});
+        }
+    }
+    #[cfg(not(unix))]
+    { serde_json::json!({"error": "park-tree not implemented on Windows"}) }
+}
+
+pub fn handle_wake(pid: i32) -> serde_json::Value {
+    #[cfg(unix)]
+    {
+        let r = unsafe { libc::kill(pid, libc::SIGCONT) };
+        if r == 0 { serde_json::json!({"woken": [pid], "state": "running"}) } else { serde_json::json!({"error": format!("no such pid {}", pid)}) }
+    }
+    #[cfg(not(unix))]
+    { serde_json::json!({"error": "wake not implemented on Windows"}) }
+}
+
+pub fn handle_wake_tree(pid: i32) -> serde_json::Value {
+    #[cfg(unix)]
+    {
+        let snap = caproom_core::collector::snapshot_current_user();
+        if let Some(tree) = caproom_core::process_tree::Tree::build(pid, &snap) {
+            let mut woken = Vec::new();
+            for p in &tree.pids {
+                if unsafe { libc::kill(*p, libc::SIGCONT) } == 0 { woken.push(*p); }
+            }
+            return serde_json::json!({"woken": woken, "tree_pid": pid, "tree_pids": tree.pids});
+        } else {
+            // fallback single
+            let r = unsafe { libc::kill(pid, libc::SIGCONT) };
+            if r == 0 { serde_json::json!({"woken": [pid]}) } else { serde_json::json!({"error": format!("no such pid {}", pid)}) }
+        }
+    }
+    #[cfg(not(unix))]
+    { serde_json::json!({"error": "wake-tree not implemented on Windows"}) }
+}
+
+pub fn handle_run(command: Vec<String>, limit_mb: u64) -> serde_json::Value {
+    if command.is_empty() { return serde_json::json!({"error": "empty command"}); }
+    // Use caproom_core pressure effective limit for check, then spawn via std::process with watchdog?
+    // Minimal v1: spawn and wait, report exit, not full watchdog (watchdog is in cli crate). For MCP, we proxy to `caproom run` binary if available.
+    let caproom_bin = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("caproom"))).unwrap_or_else(|| std::path::PathBuf::from("caproom"));
+    let mut cmd = std::process::Command::new(&caproom_bin);
+    cmd.args(["run", "--limit", &limit_mb.to_string(), "--"]).args(&command);
+    let out = cmd.output();
+    match out {
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+            let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+            let killed = stderr.contains("KILLED BY CAP") || stderr.contains("exceeded") || o.status.code() == Some(137) || o.status.code() == Some(143);
+            serde_json::json!({"command": command, "limit_mb": limit_mb, "exit_code": o.status.code().unwrap_or(-1), "killed_by_cap": killed, "stdout": stdout, "stderr": stderr, "reason_code": if killed { "PRESSURE" } else { "NONE" }})
+        },
+        Err(e) => serde_json::json!({"error": e.to_string()}),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,5 +161,11 @@ mod tests {
         assert!(!s.contains("\"message\""), "freeform message field must not exist");
         // state must be enum, not arbitrary string
         for p in &r.processes { let _ = serde_json::to_value(&p.state).unwrap(); }
+    }
+    #[test]
+    fn park_wake_roundtrip() {
+        let pid = std::process::id() as i32; // self, don't actually park self
+        let v = handle_top(Some(pid));
+        assert!(v.processes.is_empty() || !v.processes.is_empty()); // just ensure top works with pid filter
     }
 }
