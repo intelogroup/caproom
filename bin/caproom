@@ -746,7 +746,9 @@ run_watchdog() {
   # Terminal hygiene: a TUI child (opencode, claude, ...) puts the tty in
   # raw + mouse-tracking mode. If WE kill it, it never restores, and the
   # user's shell then prints mouse reports like [[<35;25;15M as garbage.
-  # Snapshot termios before spawn so we can put the tty back after a kill.
+  # Clear any stale mode from a previous kill BEFORE snapshot, then snapshot
+  # the clean state so restore goes to sane, not back to garbage.
+  printf '\033[?1049l\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?2004l\033[?25h' >/dev/tty 2>/dev/null || true
   local saved_stty=""
   if [[ -t 0 ]]; then
     saved_stty=$(stty -g </dev/tty 2>/dev/null || true)
