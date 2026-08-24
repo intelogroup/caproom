@@ -1,5 +1,12 @@
 use std::io::{BufRead, Write};
 
+/// EPIPE-safe write: a client that disconnects mid-session must not panic the
+/// server — exit cleanly instead.
+fn send(stdout: &mut std::io::Stdout, resp: &serde_json::Value) {
+    if writeln!(stdout, "{}", resp).is_err() { std::process::exit(0); }
+    let _ = stdout.flush();
+}
+
 fn main() {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
@@ -10,7 +17,7 @@ fn main() {
             Ok(j) => j,
             Err(e) => {
                 let err = serde_json::json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":e.to_string()}});
-                writeln!(stdout, "{}", err).unwrap(); stdout.flush().unwrap(); continue;
+                send(&mut stdout, &err); continue;
             }
         };
         let id = v.get("id").cloned().unwrap_or(serde_json::Value::Null);
@@ -44,56 +51,70 @@ fn main() {
                 let params = v.get("params").cloned().unwrap_or(serde_json::Value::Null);
                 let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
                 let args = params.get("arguments").cloned().unwrap_or(serde_json::Value::Null);
-                let result_text = match name {
+                match name {
                     "top" => {
                         let pid = args.get("pid").and_then(|p| p.as_i64()).map(|p| p as i32);
                         let r = caproom_mcp::handle_top(pid);
-                        serde_json::to_string(&r).unwrap()
+                        send(&mut stdout, &serde_json::json!({
+                            "jsonrpc":"2.0","id":id,
+                            "result":{"content":[{"type":"text","text": serde_json::to_string(&r).unwrap()}]}
+                        }));
                     },
-                    "park" => {
+                    "park" | "park_tree" | "wake" | "wake_tree" => {
                         let pid = args.get("pid").and_then(|p| p.as_i64()).unwrap_or(0) as i32;
-                        serde_json::to_string(&caproom_mcp::handle_park(pid)).unwrap()
-                    },
-                    "park_tree" => {
-                        let pid = args.get("pid").and_then(|p| p.as_i64()).unwrap_or(0) as i32;
-                        serde_json::to_string(&caproom_mcp::handle_park_tree(pid)).unwrap()
-                    },
-                    "wake" => {
-                        let pid = args.get("pid").and_then(|p| p.as_i64()).unwrap_or(0) as i32;
-                        serde_json::to_string(&caproom_mcp::handle_wake(pid)).unwrap()
-                    },
-                    "wake_tree" => {
-                        let pid = args.get("pid").and_then(|p| p.as_i64()).unwrap_or(0) as i32;
-                        serde_json::to_string(&caproom_mcp::handle_wake_tree(pid)).unwrap()
+                        let r = match name {
+                            "park" => caproom_mcp::handle_park(pid),
+                            "park_tree" => caproom_mcp::handle_park_tree(pid),
+                            "wake" => caproom_mcp::handle_wake(pid),
+                            _ => caproom_mcp::handle_wake_tree(pid),
+                        };
+                        send(&mut stdout, &serde_json::json!({
+                            "jsonrpc":"2.0","id":id,
+                            "result":{"content":[{"type":"text","text": r.to_string()}]}
+                        }));
                     },
                     "run" => {
                         let cmd = args.get("command").and_then(|c| c.as_array()).map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect::<Vec<_>>()).unwrap_or_default();
                         let limit = args.get("limit_mb").and_then(|l| l.as_u64()).unwrap_or(4096);
-                        serde_json::to_string(&caproom_mcp::handle_run(cmd, limit)).unwrap()
+                        let r = caproom_mcp::handle_run(cmd, limit);
+                        send(&mut stdout, &serde_json::json!({
+                            "jsonrpc":"2.0","id":id,
+                            "result":{"content":[{"type":"text","text": r.to_string()}]}
+                        }));
                     },
                     "freemem" => {
                         let pct = caproom_core::pressure::free_mem_pct();
-                        serde_json::to_string(&serde_json::json!({"free_pct": pct})).unwrap()
+                        let text = serde_json::to_string(&serde_json::json!({"free_pct": pct})).unwrap();
+                        send(&mut stdout, &serde_json::json!({
+                            "jsonrpc":"2.0","id":id,
+                            "result":{"content":[{"type":"text","text": text}]}
+                        }));
                     },
                     "status" => {
                         let pid = args.get("pid").and_then(|p| p.as_i64()).unwrap_or(0) as i32;
                         let snap = caproom_core::collector::snapshot_current_user();
-                        if let Some(pr) = snap.by_pid(pid) {
+                        let text = if let Some(pr) = snap.by_pid(pid) {
                             serde_json::to_string(&serde_json::json!({"pid": pr.pid, "state": pr.state.to_string(), "footprint_kb": pr.footprint_kb, "cmd": pr.cmd})).unwrap()
                         } else {
                             serde_json::to_string(&serde_json::json!({"error": format!("no such pid {}", pid)})).unwrap()
-                        }
+                        };
+                        send(&mut stdout, &serde_json::json!({
+                            "jsonrpc":"2.0","id":id,
+                            "result":{"content":[{"type":"text","text": text}]}
+                        }));
                     },
-                    _ => serde_json::to_string(&serde_json::json!({"error": format!("unknown tool {}", name)})).unwrap()
-                };
-                serde_json::json!({
-                    "jsonrpc":"2.0","id":id,
-                    "result":{"content":[{"type":"text","text": result_text}]}
-                })
+                    _ => {
+                        // spec: unknown tool is a JSON-RPC error object, not a success result
+                        send(&mut stdout, &serde_json::json!({
+                            "jsonrpc":"2.0","id":id,
+                            "error":{"code":-32601,"message": format!("unknown tool {}", name)}
+                        }));
+                    }
+                }
+                continue;
             },
             _ => serde_json::json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message": format!("unknown method {}", method)}})
         };
-        writeln!(stdout, "{}", resp).unwrap();
-        stdout.flush().unwrap();
+        send(&mut stdout, &resp);
     }
 }
