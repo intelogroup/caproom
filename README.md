@@ -15,10 +15,12 @@ macOS has no reliable way to cap a process's memory from userspace. A runaway pr
 caproom --limit <mb> -- <command> [args...]
 ```
 
-Two backends:
+Two backends (bash 0.7.6):
 
 1. **Host-native polling watchdog** (`ps` RSS + `SIGKILL`) — the **default** on macOS/Linux. Runs in your real environment: same PATH, auth, native binaries, tty. Measures the **whole process tree** each poll (agents keep their memory in children — MCP servers, bundler daemons, headless browsers — while the parent's own RSS stays flat). Has a small race window bounded by `--interval` (default 200ms).
 2. **Docker cgroup** (`--memory`) — opt-in with `--docker`. Hard cap, real kernel enforcement, zero race window — at the cost of running inside a Linux container (see caveats below). Fails loudly if the daemon isn't reachable rather than silently switching backends.
+
+**Rust port (CLI-first v1, current `main`):** `phys_footprint` via `proc_pid_rusage` (libproc, not `ps`; bench 13ms vs 20ms) + `proc_listallpids` tree walk, polling-only 200ms (`vm_stat` free/inactive). `dispatch_source_memorypressure` event-driven (0% idle) is **not built** — current Rust is a faster polling loop with better metrics, not the event-driven daemon pitched. Deferred to daemon v1.1 global listener. Docker backend dropped in Rust (native only).
 
 ## Install
 
@@ -63,13 +65,13 @@ On cap breach, the watchdog backend sends `SIGTERM` first and waits `--grace` se
 
 The three enforcement mechanisms measure different quantities and cover children differently. Read this before reusing a `--limit` number across platforms or backends. The watchdog is the POSIX default; Docker is opt-in — caproom prefers to run your command unmodified in its real environment and *miss* an exotic memory spike over breaking a working workflow with container drift:
 
-| | Docker cgroup | Windows Job Object | Watchdog (POSIX) | Watchdog (Windows) |
-|---|---|---|---|---|
-| Measures | cgroup memory | **committed virtual memory** | RSS of the process tree | working set of the process tree |
-| Children counted | yes — whole container | yes — auto-inherited at spawn | yes — tree walked each poll | yes — tree walked each poll |
-| Enforcement | kernel OOM-kill | allocation fails in-process | TERM → grace → KILL | hard kill (`taskkill /T /F`) |
-| Race window | none | none | bounded by `--interval` | bounded by `--interval` |
-| Interactive/streaming output | degraded — no TTY (`-i` only) | full — streamed live | full — child inherits the tty | streamed live via temp-file tail-follow (~50ms cadence) |
+| | Docker cgroup (bash, dropped in Rust) | Windows Job Object | Watchdog (POSIX) bash | Watchdog (POSIX) Rust v1 | Watchdog (Windows) |
+|---|---|---|---|---|---|
+| Measures | cgroup memory | **committed virtual memory** | RSS of the process tree | **phys_footprint** (`ri_phys_footprint`) | working set of the process tree |
+| Children counted | yes — whole container | yes — auto-inherited at spawn | yes — tree walked each poll | yes — libproc tree walked each poll | yes — tree walked each poll |
+| Enforcement | kernel OOM-kill | allocation fails in-process | TERM → grace → KILL | TERM → grace → KILL (143 TERM, 137 KILL) | hard kill (`taskkill /T /F`) |
+| Race window | none | none | bounded by `--interval` | bounded by `--interval` (polling-only v1; event-driven deferred) | bounded by `--interval` |
+| Interactive/streaming output | degraded — no TTY (`-i` only) | full — streamed live | full — child inherits the tty | full — child inherits the tty | streamed live via temp-file tail-follow (~50ms cadence) |
 
 **Committed vs RSS**: Node/V8 runtimes commit far more virtual memory than they touch, so a limit tuned against RSS on macOS will bite much earlier under the Job Object backend. Tune per platform.
 
@@ -180,15 +182,15 @@ Naming the pid IS the per-process opt-in — there is no system-wide mode, since
 
 Typical loop: `top --json` finds candidates → `watch --auto-park` babysits them during heavy builds → explicit or automatic wake restores them after.
 
-## MCP server — native agent access
+## MCP server — native agent access (pull-only, typed)
 
-`npm i -g caproom` also installs `caproom-mcp`, a zero-dependency MCP server (stdio) exposing the agent interface as tools:
+`npm i -g caproom` also installs `caproom-mcp` (bash: zero-dependency stdio). Rust `crates/caproom-mcp` is hand-rolled `serde` JSON with strictly typed enums (`state: parked|running|zombie`, `reason_code: PARK_IDLE|GROWTH_RATE|PRESSURE|NONE`, `growth_kb_s`, `free_pct`) — no `message` string (injection surface closed). `rmcp` 3.1.4 **not integrated** (zero hits in `Cargo.toml`), `watch_start`/`watch_events`/`watch_stop` and `rmcp` port deferred to v1.1 with tokio isolated to MCP crate. `bin/caproom-mcp.js` shim stays for v1. Pull-only (see `skills/caproom-memory/SKILL.md`): agent calls `top` every 3 tool calls/30s, human ack before kill.
 
 ```json
 { "mcpServers": { "caproom": { "command": "caproom-mcp" } } }
 ```
 
-Tools: `top` (tree inventory, stable schema), `park`/`wake`, `watch_start`/`watch_events`/`watch_stop` (daemon lifecycle, NDJSON events), and `run` (execute a command under a cap, returns a KILLED-BY-CAP verdict at exit 137). Same gating as the CLI: watch requires explicit pids; auto-park is opt-in per watcher.
+Tools (v1): `top` (typed, stable schema), `park`/`wake`. `watch_*` + `run` deferred. Same gating: watch requires explicit pids; auto-park opt-in.
 
 ## What it never touches
 
@@ -216,10 +218,15 @@ caproom init claude --limit 6144 >> $PROFILE
 
 Docker backend is not wired up on Windows — the Job Object path already gives kernel enforcement, so there is nothing for it to add.
 
+## Rust port status (current `main`)
+
+- `caproom` Rust binary: `cargo build --release` 1.2M, `phys_footprint` via libproc 13ms vs `ps` 20ms per `top --json` (`scripts/bench_phys_vs_ps.sh`), typed `top --json` with `growth_kb_s`/`reason_code`/`free_pct`, `caproom calibrate` suggests 14G on 24GB (60% total), `test/sum-oom.sh` gate now real (6×800M limit 400 → 6/6 `143` capped, was stub `exit 0` false green).
+- Not yet: `dispatch_source_memorypressure` event-driven (polling-only v1), `rmcp` port, daemon+arbiter. See `docs/plan-caproom-rust.md:1` for reality vs pitch.
+
 ## Limitations
 
-- Docker backend mounts `$PWD` into the container at `/work` and runs there — paths outside `$PWD` aren't visible to the command.
-- Watchdog backends have a real (if small) race window; for a hard guarantee, opt into the Docker backend (`--docker`) on POSIX, or use the Job Object backend on Windows.
+- Docker backend mounts `$PWD` into the container at `/work` and runs there — paths outside `$PWD` aren't visible to the command. **Dropped in Rust v1** (native `phys_footprint` only).
+- Watchdog backends have a real (if small) race window; for a hard guarantee, opt into the Docker backend (`--docker`, bash only) on POSIX, or use the Job Object backend on Windows.
 - The watchdog's tree walk follows live parent→child edges. A child that *daemonizes* (double-fork, reparented to init/launchd) leaves the tree and escapes the cap — as does any process spawned after its parent chain broke, or during the kill grace window. On breach the watchdog signals every pid in the measured tree and SIGKILLs survivors of the grace period from a breach-time snapshot, so children cannot outlive the root — but processes that detach *before* being observed are missed by design. The Windows Job Object backend does not have this gap. This is a deliberate trade: caproom prefers to **miss** memory outside the tracked lineage rather than risk interfering with processes the user didn't ask it to manage.
 - On Windows, `Get-CimInstance` per poll makes the watchdog heavier than a plain RSS read; keep `--interval` at 0.2s or above there.
 - On Windows, the Job Object holds only the wrapped command and its descendants — never caproom itself — so the full `--limit` reaches your workload. (Cost: a millisecond-scale window after spawn before assignment lands, where the child is not yet counted.)
