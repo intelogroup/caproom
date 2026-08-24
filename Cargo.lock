@@ -90,6 +90,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "caproom-mcp"
+version = "0.7.6"
+dependencies = [
+ "caproom-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,0 +1,11 @@
+[package]
+name = "caproom-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "caproom MCP — pull-only, strictly typed enums (no push)"
+
+[dependencies]
+caproom-core = { path = "../caproom-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
