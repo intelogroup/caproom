@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.4 — 2026-08-24
+
+### Added
+- **`--pty` / `CAPROOM_PTY=1` — real pty via `forkpty` (`scripts/pty_wrapper.py` python or `script` fallback) with verbatim byte forwarding.** Full terminal fidelity for TUI (`OSC 10/11`, `DSR CPR`, mouse `DEC 1003`) while the watchdog still enforces the cap on the pty tree (same `SIGTERM` → grace → `SIGKILL` sweep, exit `137`/`143`). `--pty` implies pty allocation; fallback to `bypass` if `python3`/`script` unavailable. Verified: `bin/caproom --pty -- bash -c 'tty'` shows `/dev/ttys*`, `fake-tui` no leak, `hog` still caps (`75968KB exceeded 65536KB` → `143`) with no orphans. `package.json` now ships `scripts/pty_wrapper.py`.
+
 ## 0.7.3 — 2026-08-24
 
 ### Fixed
