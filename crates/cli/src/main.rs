@@ -38,8 +38,7 @@ enum Cmd {
 }
 
 fn main() {
-    let cli = Cli::parse();
-    // allow `caproom --limit 2048 -- npm run build` compat: treat remaining args as run
+    let cli = Cli::parse();    // allow `caproom --limit 2048 -- npm run build` compat: treat remaining args as run
     // clap handles subcommand; for direct exec without `run` keyword, fallback handled below
     match cli.cmd {
         Some(Cmd::Freemem) => println!("{}", pressure::free_mem_pct()),
@@ -73,6 +72,11 @@ static CLI_CPU: std::sync::OnceLock<std::sync::Mutex<CpuRing>> = std::sync::Once
 fn cli_cpu() -> &'static std::sync::Mutex<CpuRing> {
     CLI_CPU.get_or_init(|| std::sync::Mutex::new(CpuRing::new()))
 }
+/// Truncate for display on char boundary — byte-slicing panics on multibyte UTF-8.
+fn truncate_cmd(s: &str, max_chars: usize) -> String {
+    s.chars().take(max_chars).collect()
+}
+
 fn cmd_top(json: bool, filter_pid: Option<i32>, park_min_mb: u64) {
     let snap = collector::snapshot_current_user();
     let ppid_map = snap.ppid_map();
@@ -109,7 +113,7 @@ fn cmd_top(json: bool, filter_pid: Option<i32>, park_min_mb: u64) {
         println!("{}", serde_json::to_string(&v).unwrap());
     } else {
         println!("{:<8} {:>10} {:<8} {:<9} {}", "PID", "TREE_MB", "STATE", "PIDS", "COMMAND");
-        for p in &out { println!("{:<8} {:>10} {:<8} {:<9} {}", p.pid, p.tree_rss_kb/1024, p.state, p.tree_pids.len(), &p.cmd[..p.cmd.len().min(60)]); }
+        for p in &out { println!("{:<8} {:>10} {:<8} {:<9} {}", p.pid, p.tree_rss_kb/1024, p.state, p.tree_pids.len(), truncate_cmd(&p.cmd, 60)); }
     }
 }
 
@@ -362,5 +366,17 @@ fn cmd_run(cmd: Vec<String>, limit_mb: u64, interval: f64, grace: u64) {
             // root reparented / escaped — exit cleanly, don't kill unrelated
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_cmd;
+    #[test]
+    fn truncate_cmd_never_panics_on_multibyte() {
+        let emoji_cmd = "node 🦀🦀🦀🦀🦀 --flag".repeat(10);
+        let _ = truncate_cmd(&emoji_cmd, 60);
+        assert!(truncate_cmd(&emoji_cmd, 60).chars().count() <= 60);
+        assert_eq!(truncate_cmd("short", 60), "short");
     }
 }
