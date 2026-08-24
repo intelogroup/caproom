@@ -1,15 +1,35 @@
 #[cfg(target_os = "macos")]
 pub fn free_mem_pct() -> u8 {
-    // vm_stat Pages free + inactive vs hw.memsize, same as bin/caproom mem_free_pct:441
     use std::process::Command;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+
+    static MEMSIZE_CACHE: OnceLock<u64> = OnceLock::new();
+    static FREE_CACHE: OnceLock<Mutex<(u8, Instant)>> = OnceLock::new();
+    fn free_cache() -> &'static Mutex<(u8, Instant)> {
+        FREE_CACHE.get_or_init(|| Mutex::new((35, Instant::now() - Duration::from_secs(10))))
+    }
+
+    // cache free_pct for 800ms — watchdog polls 200ms, so 4 polls share one vm_stat spawn
+    {
+        let guard = free_cache().lock().unwrap();
+        if guard.1.elapsed() < Duration::from_millis(800) {
+            return guard.0;
+        }
+    }
+
+    // memsize read once (hw.memsize is static) — was spawning sysctl every poll
+    let memsize = *MEMSIZE_CACHE.get_or_init(|| {
+        Command::new("sysctl")
+            .args(["-n", "hw.memsize"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u64>().ok())
+            .unwrap_or(24 * 1024 * 1024 * 1024)
+    });
+
     let vm = Command::new("vm_stat").output().ok();
-    let memsize = Command::new("sysctl")
-        .args(["-n", "hw.memsize"])
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u64>().ok())
-        .unwrap_or(24 * 1024 * 1024 * 1024);
-    if let Some(vm) = vm {
+    let computed = if let Some(vm) = vm {
         let text = String::from_utf8_lossy(&vm.stdout);
         let mut free: u64 = 0;
         let mut inactive: u64 = 0;
@@ -28,14 +48,29 @@ pub fn free_mem_pct() -> u8 {
             }
         }
         let avail = (free + inactive) * page;
-        return ((avail * 100) / memsize) as u8;
-    }
-    35
+        ((avail * 100) / memsize) as u8
+    } else {
+        35
+    };
+    *free_cache().lock().unwrap() = (computed, Instant::now());
+    computed
 }
 
 #[cfg(target_os = "linux")]
 pub fn free_mem_pct() -> u8 {
     use std::fs;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+    static LINUX_CACHE: OnceLock<Mutex<(u8, Instant)>> = OnceLock::new();
+    fn linux_cache() -> &'static Mutex<(u8, Instant)> {
+        LINUX_CACHE.get_or_init(|| Mutex::new((35, Instant::now() - Duration::from_secs(10))))
+    }
+    {
+        let guard = linux_cache().lock().unwrap();
+        if guard.1.elapsed() < Duration::from_millis(200) {
+            return guard.0;
+        }
+    }
     let meminfo = fs::read_to_string("/proc/meminfo").unwrap_or_default();
     let mut avail = 0u64;
     let mut total = 1u64;
@@ -47,7 +82,9 @@ pub fn free_mem_pct() -> u8 {
             total = line.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(1);
         }
     }
-    ((avail * 100) / total) as u8
+    let computed = ((avail * 100) / total) as u8;
+    *linux_cache().lock().unwrap() = (computed, Instant::now());
+    computed
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]

@@ -66,9 +66,45 @@ pub fn reason_code(park_candidate: bool, growth_kb_s: i64, free_pct: u8) -> &'st
     else { "NONE" }
 }
 
+/// v0.9: growth enforcement is not bare `>200 KB/s`. Require near-limit + pressure + projected breach.
+/// 200 KB/s = 12 MB/min is normal for indexing/compiling — only enforce if:
+/// - growth >200 AND
+/// - footprint >=70% of effective limit OR pressure <20% AND
+/// - projected breach <5 min (or <10 min with >1MB/s)
+pub fn should_enforce_growth(growth_kb_s: i64, footprint_kb: u64, eff_kb: u64, free_pct: u8) -> bool {
+    if growth_kb_s <= 200 { return false; }
+    if eff_kb == 0 { return false; }
+    let near_limit = footprint_kb * 100 / eff_kb >= 70;
+    let pressured = free_pct < 20;
+    if !near_limit && !pressured { return false; }
+    let remaining = eff_kb.saturating_sub(footprint_kb) as i64;
+    if remaining <= 0 { return true; }
+    let secs_to_limit = remaining as f64 / growth_kb_s as f64;
+    // very high growth enforces sooner
+    if growth_kb_s > 1024 && secs_to_limit < 600.0 { return true; }
+    // otherwise need near limit and <5 min to breach
+    near_limit && secs_to_limit < 300.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn growth_enforcement_needs_context() {
+        // bare 500 KB/s but far from limit and no pressure — should NOT enforce (12 MB/min is normal indexing)
+        assert!(!should_enforce_growth(500, 1000*1024, 4096*1024, 40), "far from limit, no pressure, 500 KB/s is normal");
+        // same growth but near limit 96% and <5min to breach — should enforce
+        assert!(should_enforce_growth(500, 3950*1024, 4096*1024, 40), "96% + 500 KB/s => 146MB/500=292s <300");
+        // moderate growth 300 but pressured free 10% and near limit — enforce
+        assert!(should_enforce_growth(300, 4010*1024, 4096*1024, 10), "4010 86KB/300=286s <300");
+        // high growth 2MB/s near limit with pressure — enforce (fast leak) 596MB/2048=291s <600
+        assert!(should_enforce_growth(2048, 3500*1024, 4096*1024, 15));
+        // low growth under threshold never enforces even near limit
+        assert!(!should_enforce_growth(100, 3900*1024, 4096*1024, 10));
+        // projected breach far (>10min) with no pressure should not enforce
+        // 300 KB/s, 2GB remaining => 6826 sec >600
+        assert!(!should_enforce_growth(300, 2000*1024, 4096*1024, 40));
+    }
     #[test]
     fn growth_smoothing() {
         let mut r = GrowthRing::new();

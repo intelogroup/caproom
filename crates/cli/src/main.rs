@@ -196,7 +196,7 @@ fn cmd_run(cmd: Vec<String>, limit_mb: u64, interval: f64, grace: u64) {
                 let g = rg.update(pid, tree.footprint_kb);
                 g
             };
-            let growth_trigger = growth_kb_s > 200;
+            let growth_trigger = caproom_core::growth::should_enforce_growth(growth_kb_s, tree.footprint_kb, eff_kb, free);
             if tree.footprint_kb >= eff_kb || growth_trigger {
                 // fix #2: park idle subtrees → resample → only TERM if still over
                 let states: HashMap<i32,char> = snap.procs.iter().map(|p| (p.pid, p.state)).collect();
