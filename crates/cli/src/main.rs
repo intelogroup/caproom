@@ -25,6 +25,8 @@ enum Cmd {
     Park { pid: i32 },
     Wake { pid: i32 },
     Status { pid: i32 },
+    /// Calibrate: suggest limit from current footprint vs total RAM (24GB→14G, 8GB→4G)
+    Calibrate { #[arg(long, default_value="30")] duration: u64 },
     /// Run command under cap: caproom run --limit 2048 -- cmd args
     Run { #[arg(last=true)] cmd: Vec<String> },
 }
@@ -39,6 +41,7 @@ fn main() {
         Some(Cmd::Park { pid }) => cmd_park(pid),
         Some(Cmd::Wake { pid }) => cmd_wake(pid),
         Some(Cmd::Status { pid }) => cmd_status(pid),
+        Some(Cmd::Calibrate { duration }) => cmd_calibrate(duration),
         Some(Cmd::Run { cmd }) => cmd_run(cmd, cli.limit, cli.interval, cli.grace),
         None => {
             // parse raw args for `caproom -- cmd` compat
@@ -110,6 +113,34 @@ fn cmd_status(pid: i32) {
     let out = std::process::Command::new("ps").args(["-o","pid,stat,rss,etime,command=","-p",&pid.to_string()]).output().unwrap();
     print!("{}", String::from_utf8_lossy(&out.stdout));
     if !out.status.success() { eprintln!("caproom: no such pid {}", pid); std::process::exit(1); }
+}
+
+fn cmd_calibrate(duration: u64) {
+    use std::process::Command;
+    let total_kb = Command::new("sysctl").args(["-n","hw.memsize"]).output().ok()
+        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u64>().ok().map(|b| b/1024))
+        .unwrap_or(24*1024*1024);
+    let total_gb = total_kb as f64 / (1024.0*1024.0);
+    let snap = collector::snapshot_current_user();
+    // measure top 3 trees to estimate agent envelope
+    let mut trees: Vec<_> = Tree::roots(&snap).into_iter().filter_map(|r| Tree::build(r, &snap)).collect();
+    trees.sort_by(|a,b| b.footprint_kb.cmp(&a.footprint_kb));
+    let top_mb: u64 = trees.iter().take(3).map(|t| t.footprint_kb/1024).sum();
+    // suggestion: 60% of total for 24GB→14G, clamp to 4G min, 80% max
+    let suggested = ((total_kb as f64 * 0.6) as u64).clamp(4096*1024/1024, (total_kb as f64 * 0.8) as u64) /1024;
+    // migration note: old RSS limit 6144 ≈ footprint ~80% due to shared overcount
+    let rss_equiv = (suggested as f64 * 1.25) as u64;
+    println!("caproom calibrate ({}s canary)", duration);
+    println!(" total RAM: {:.1}GB ({}MB)", total_gb, total_kb/1024);
+    println!(" free mem: {}% ({}MB avail)", pressure::free_mem_pct(), (total_kb as f64 * pressure::free_mem_pct() as f64 /100.0) as u64 /1024);
+    println!(" top trees footprint: {}MB ({} trees)", top_mb, trees.len().min(3));
+    for t in trees.iter().take(3) { println!("   pid {} {}MB {}", t.root_pid, t.footprint_kb/1024, t.cmd.chars().take(50).collect::<String>()); }
+    println!(" suggested --limit: {}MB ({}G)", suggested, suggested/1024);
+    println!(" migration: old RSS --limit {} ≈ footprint {} (footprint ~80% of RSS due to shared overcount)", rss_equiv, suggested);
+    println!(" usage: caproom run --limit {} -- claude  (or CAPROOM_LIMIT_MB={} claude)", suggested, suggested);
+    if duration > 0 {
+        println!(" canary: run `caproom run --limit {} -- <your build>` for {}s to validate", suggested, duration);
+    }
 }
 
 fn cmd_run(cmd: Vec<String>, limit_mb: u64, interval: f64, grace: u64) {
