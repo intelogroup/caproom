@@ -113,8 +113,12 @@ fn cmd_top(json: bool, filter_pid: Option<i32>, park_min_mb: u64) {
     }
 }
 
+/// kill(0) signals our own process group, kill(1) targets init — reject both.
+fn valid_pid(pid: i32) -> bool { pid > 1 }
+
 #[cfg(unix)]
 fn cmd_park(pid: i32) {
+    if !valid_pid(pid) { eprintln!("caproom: invalid pid {} — must be > 1", pid); std::process::exit(1); }
     if unsafe { libc::kill(pid, libc::SIGSTOP) } != 0 { eprintln!("caproom: no such pid {}", pid); std::process::exit(1); }
     eprintln!("caproom: pid {} parked (SIGSTOP) — pages eligible for reclaim under pressure; wake with: caproom wake {}", pid, pid);
 }
@@ -126,6 +130,7 @@ fn cmd_park(pid: i32) {
 }
 #[cfg(unix)]
 fn cmd_wake(pid: i32) {
+    if !valid_pid(pid) { eprintln!("caproom: invalid pid {} — must be > 1", pid); std::process::exit(1); }
     if unsafe { libc::kill(pid, libc::SIGCONT) } != 0 { eprintln!("caproom: no such pid {}", pid); std::process::exit(1); }
     eprintln!("caproom: pid {} woken (SIGCONT)", pid);
 }
@@ -137,6 +142,7 @@ fn cmd_wake(pid: i32) {
 
 #[cfg(unix)]
 fn cmd_park_tree(pid: i32) {
+    if !valid_pid(pid) { eprintln!("caproom: invalid pid {} — must be > 1", pid); std::process::exit(1); }
     let snap = collector::snapshot_current_user();
     if let Some(tree) = caproom_core::process_tree::Tree::build(pid, &snap) {
         // PID reuse guard: verify start_time matches snapshot
@@ -168,6 +174,7 @@ fn cmd_park_tree(pid: i32) {
 
 #[cfg(unix)]
 fn cmd_wake_tree(pid: i32) {
+    if !valid_pid(pid) { eprintln!("caproom: invalid pid {} — must be > 1", pid); std::process::exit(1); }
     let snap = collector::snapshot_current_user();
     if let Some(tree) = caproom_core::process_tree::Tree::build(pid, &snap) {
         let mut woken = 0;

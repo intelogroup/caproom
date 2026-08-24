@@ -68,7 +68,14 @@ pub fn handle_top(pid: Option<i32>) -> TopResponse {
     TopResponse{ schema: 1, ts: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(), limit_mb_default: 4096, processes }
 }
 
+/// pid <= 1 must never be signalled: kill(0) hits our own process group,
+/// kill(1) targets init. Both are caller bugs, not caproom operations.
+fn valid_pid(pid: i32) -> bool { pid > 1 }
+
 pub fn handle_park(pid: i32) -> serde_json::Value {
+    if !valid_pid(pid) {
+        return serde_json::json!({"error": format!("invalid pid {} — must be > 1", pid)});
+    }
     #[cfg(unix)]
     {
         let r = unsafe { libc::kill(pid, libc::SIGSTOP) };
@@ -83,6 +90,9 @@ pub fn handle_park(pid: i32) -> serde_json::Value {
 }
 
 pub fn handle_park_tree(pid: i32) -> serde_json::Value {
+    if !valid_pid(pid) {
+        return serde_json::json!({"error": format!("invalid pid {} — must be > 1", pid)});
+    }
     #[cfg(unix)]
     {
         let snap = caproom_core::collector::snapshot_current_user();
@@ -101,6 +111,9 @@ pub fn handle_park_tree(pid: i32) -> serde_json::Value {
 }
 
 pub fn handle_wake(pid: i32) -> serde_json::Value {
+    if !valid_pid(pid) {
+        return serde_json::json!({"error": format!("invalid pid {} — must be > 1", pid)});
+    }
     #[cfg(unix)]
     {
         let r = unsafe { libc::kill(pid, libc::SIGCONT) };
@@ -111,6 +124,9 @@ pub fn handle_wake(pid: i32) -> serde_json::Value {
 }
 
 pub fn handle_wake_tree(pid: i32) -> serde_json::Value {
+    if !valid_pid(pid) {
+        return serde_json::json!({"error": format!("invalid pid {} — must be > 1", pid)});
+    }
     #[cfg(unix)]
     {
         let snap = caproom_core::collector::snapshot_current_user();
@@ -167,5 +183,19 @@ mod tests {
         let pid = std::process::id() as i32; // self, don't actually park self
         let v = handle_top(Some(pid));
         assert!(v.processes.is_empty() || !v.processes.is_empty()); // just ensure top works with pid filter
+    }
+    #[test]
+    fn invalid_pid_rejected_without_signalling() {
+        // kill(0) signals our own process group, kill(1) targets init — both must error out
+        for bad in [0i32, 1, -1, -4096] {
+            for v in [
+                handle_park(bad),
+                handle_park_tree(bad),
+                handle_wake(bad),
+                handle_wake_tree(bad),
+            ] {
+                assert!(v.get("error").is_some(), "pid {} must be rejected, got {}", bad, v);
+            }
+        }
     }
 }
