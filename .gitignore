@@ -2,3 +2,6 @@ node_modules/
 *.log
 graphify-out/
 target/
+bin/caproom-rs
+bin/caproom-rs.exe
+prebuilt/
