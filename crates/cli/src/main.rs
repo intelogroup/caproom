@@ -45,6 +45,22 @@ enum Cmd {
 }
 
 fn main() {
+    // bare-exec compat: `caproom --limit N -- cmd args` — clap can't model
+    // trailing positional args without a subcommand, so split at the first
+    // `--` ourselves and parse only the flag side.
+    let raw: Vec<String> = std::env::args().collect();
+    const SUBCMDS: [&str; 10] = ["freemem","top","park","park-tree","wake","wake-tree","status","calibrate","run","help"];
+    let has_subcmd = raw.iter().skip(1).any(|a| SUBCMDS.contains(&a.as_str()));
+    if !has_subcmd {
+        if let Some(idx) = raw.iter().position(|a| a == "--") {
+            let cmd = raw[idx+1..].to_vec();
+            if !cmd.is_empty() {
+                let cli = Cli::parse_from(&raw[..idx]);
+                cmd_run(cmd, cli.limit, cli.interval, cli.grace);
+                return;
+            }
+        }
+    }
     let cli = Cli::parse();    // allow `caproom --limit 2048 -- npm run build` compat: treat remaining args as run
     // clap handles subcommand; for direct exec without `run` keyword, fallback handled below
     match cli.cmd {
