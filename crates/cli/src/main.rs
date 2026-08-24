@@ -25,7 +25,11 @@ enum Cmd {
     Freemem,
     Top { #[arg(long)] json: bool, #[arg(long)] pid: Option<i32>, #[arg(long, default_value="512")] park_min_mb: u64 },
     Park { pid: i32 },
+    #[command(name = "park-tree")]
+    ParkTree { pid: i32 },
     Wake { pid: i32 },
+    #[command(name = "wake-tree")]
+    WakeTree { pid: i32 },
     Status { pid: i32 },
     /// Calibrate: suggest limit from current footprint vs total RAM (24GB→14G, 8GB→4G)
     Calibrate { #[arg(long, default_value="30")] duration: u64 },
@@ -41,7 +45,9 @@ fn main() {
         Some(Cmd::Freemem) => println!("{}", pressure::free_mem_pct()),
         Some(Cmd::Top { json, pid, park_min_mb }) => cmd_top(json, pid, park_min_mb),
         Some(Cmd::Park { pid }) => cmd_park(pid),
+        Some(Cmd::ParkTree { pid }) => cmd_park_tree(pid),
         Some(Cmd::Wake { pid }) => cmd_wake(pid),
+        Some(Cmd::WakeTree { pid }) => cmd_wake_tree(pid),
         Some(Cmd::Status { pid }) => cmd_status(pid),
         Some(Cmd::Calibrate { duration }) => cmd_calibrate(duration),
         Some(Cmd::Run { cmd }) => cmd_run(cmd, cli.limit, cli.interval, cli.grace),
@@ -53,7 +59,7 @@ fn main() {
                 if !cmd.is_empty() { cmd_run(cmd, cli.limit, cli.interval, cli.grace); return; }
             }
             eprintln!("usage: caproom [--limit <mb>] [--interval <sec>] -- <command> [args...]");
-            eprintln!("       caproom top [--json] [--pid <pid>] | freemem | park <pid> | wake <pid>");
+            eprintln!("       caproom top [--json] [--pid <pid>] | freemem | park <pid> | park-tree <pid> | wake <pid> | wake-tree <pid>");
             std::process::exit(1);
         }
     }
@@ -126,6 +132,63 @@ fn cmd_wake(pid: i32) {
 #[cfg(windows)]
 fn cmd_wake(pid: i32) {
     eprintln!("caproom: wake not implemented on Windows for pid {}", pid);
+    std::process::exit(1);
+}
+
+#[cfg(unix)]
+fn cmd_park_tree(pid: i32) {
+    let snap = collector::snapshot_current_user();
+    if let Some(tree) = caproom_core::process_tree::Tree::build(pid, &snap) {
+        // PID reuse guard: verify start_time matches snapshot
+        let mut stopped = 0;
+        for p in &tree.pids {
+            if let Some(proc) = snap.by_pid(*p) {
+                // re-read current start_time for guard
+                if let Some(cur) = collector::snapshot_current_user().by_pid(*p) {
+                    if cur.start_time != 0 && proc.start_time != 0 && cur.start_time != proc.start_time {
+                        eprintln!("caproom: pid {} reused (start {} != {}), skip", p, proc.start_time, cur.start_time);
+                        continue;
+                    }
+                }
+                if unsafe { libc::kill(*p, libc::SIGSTOP) } == 0 { stopped += 1; }
+            }
+        }
+        eprintln!("caproom: tree {} pids parked (SIGSTOP) — wake with: caproom wake-tree {}", stopped, pid);
+        if stopped == 0 { std::process::exit(1); }
+    } else {
+        eprintln!("caproom: no such pid {}", pid);
+        std::process::exit(1);
+    }
+}
+#[cfg(windows)]
+fn cmd_park_tree(pid: i32) {
+    eprintln!("caproom: park-tree not implemented on Windows for pid {}", pid);
+    std::process::exit(1);
+}
+
+#[cfg(unix)]
+fn cmd_wake_tree(pid: i32) {
+    let snap = collector::snapshot_current_user();
+    if let Some(tree) = caproom_core::process_tree::Tree::build(pid, &snap) {
+        let mut woken = 0;
+        for p in &tree.pids {
+            if unsafe { libc::kill(*p, libc::SIGCONT) } == 0 { woken += 1; }
+        }
+        eprintln!("caproom: tree {} pids woken (SIGCONT)", woken);
+        if woken == 0 { std::process::exit(1); }
+    } else {
+        // pid may be stopped and not in snapshot? try single wake as fallback
+        if unsafe { libc::kill(pid, libc::SIGCONT) } == 0 {
+            eprintln!("caproom: pid {} woken (SIGCONT) fallback", pid);
+        } else {
+            eprintln!("caproom: no such pid {}", pid);
+            std::process::exit(1);
+        }
+    }
+}
+#[cfg(windows)]
+fn cmd_wake_tree(pid: i32) {
+    eprintln!("caproom: wake-tree not implemented on Windows for pid {}", pid);
     std::process::exit(1);
 }
 fn cmd_status(pid: i32) {
@@ -201,9 +264,12 @@ fn cmd_run(cmd: Vec<String>, limit_mb: u64, interval: f64, grace: u64) {
                 // fix #2: park idle subtrees → resample → only TERM if still over
                 let states: HashMap<i32,char> = snap.procs.iter().map(|p| (p.pid, p.state)).collect();
                 let foot: HashMap<i32,u64> = snap.procs.iter().map(|p| (p.pid, p.footprint_kb)).collect();
-                // wired 0.8.2: derive is_session_leader via pgid==pid (session/group leader, foregroup never parks)
-                // and cpu_delta via CpuRing (mach task_info / proc stat delta, 2% threshold keeps active watcher alive)
-                let leaders: HashMap<i32,bool> = snap.procs.iter().map(|p| (p.pid, p.pgid == p.pid)).collect();
+                // v0.9: is_session_leader via pid == sid (true session leader), fallback pgid==pid if sid unknown
+                // protects Ghostty->tmux->shell->claude foreground; pgid alone conflates group vs session
+                let leaders: HashMap<i32,bool> = snap.procs.iter().map(|p| {
+                    let is_leader = if p.sid != 0 { p.pid == p.sid } else { p.pid == p.pgid };
+                    (p.pid, is_leader)
+                }).collect();
                 let cpu: HashMap<i32,f32> = {
                     let mut ring = cli_cpu().lock().unwrap();
                     snap.procs.iter().map(|p| (p.pid, ring.update(p.pid, p.cpu_time_ns))).collect()
@@ -227,8 +293,20 @@ fn cmd_run(cmd: Vec<String>, limit_mb: u64, interval: f64, grace: u64) {
                     }
                 }
                 eprintln!("caproom: pid {} tree {}KB exceeded {}KB cap — TERM grace {}s", pid, tree.footprint_kb, limit_kb, grace);
+                // PID reuse guard: don't signal pid that has been recycled (pid, start_time)
+                let start_map: std::collections::HashMap<i32,u64> = snap.procs.iter().map(|pr| (pr.pid, pr.start_time)).collect();
+                let cur_snap_for_term = collector::snapshot_current_user();
 #[cfg(unix)]
-                for p in &tree.pids { unsafe { libc::kill(*p, libc::SIGTERM); } }
+                for p in &tree.pids {
+                    if let Some(&orig_start) = start_map.get(p) {
+                        if orig_start != 0 {
+                            if let Some(cur) = cur_snap_for_term.by_pid(*p) {
+                                if cur.start_time != orig_start { eprintln!("caproom: pid {} reused ({} != {}), skip TERM", p, cur.start_time, orig_start); continue; }
+                            }
+                        }
+                    }
+                    unsafe { libc::kill(*p, libc::SIGTERM); }
+                }
                 #[cfg(windows)]
                 for p in &tree.pids { let _ = std::process::Command::new("taskkill").args(["/PID", &p.to_string(), "/T"]).output(); }
                 let mut waited = 0;
@@ -244,7 +322,16 @@ fn cmd_run(cmd: Vec<String>, limit_mb: u64, interval: f64, grace: u64) {
                     }
                 }
                 #[cfg(unix)]
-                for p in &tree.pids { unsafe { libc::kill(*p, libc::SIGKILL); } }
+                for p in &tree.pids {
+                    if let Some(&orig_start) = start_map.get(p) {
+                        if orig_start != 0 {
+                            if let Some(cur) = collector::snapshot_current_user().by_pid(*p) {
+                                if cur.start_time != orig_start { eprintln!("caproom: pid {} reused, skip KILL", p); continue; }
+                            }
+                        }
+                    }
+                    unsafe { libc::kill(*p, libc::SIGKILL); }
+                }
                 #[cfg(windows)]
                 for p in &tree.pids { let _ = std::process::Command::new("taskkill").args(["/PID", &p.to_string(), "/F", "/T"]).output(); }
                 let status = child.wait().unwrap();

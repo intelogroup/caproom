@@ -5,6 +5,12 @@ pub struct ProcInfo {
     pub pid: i32,
     pub ppid: i32,
     pub pgid: i32,
+    /// session ID (getsid), 0 if unknown — for is_session_leader = pid == sid
+    #[serde(default)]
+    pub sid: i32,
+    /// process start time (macOS pbi_start_tvsec*1e6+usec or Linux starttime ticks) — for PID reuse guard (pid, start)
+    #[serde(default)]
+    pub start_time: u64,
     /// phys_footprint (macOS) or PSS/RSS fallback, KB
     pub footprint_kb: u64,
     /// total cpu time user+system in nanoseconds (monotonic, for delta)
@@ -207,10 +213,21 @@ fn snapshot_libproc() -> Option<Snapshot> {
             String::from_utf8_lossy(&bsd.pbi_comm).trim_end_matches('\0').to_string()
         };
 
+        // sid via getsid (session leader = pid == sid), start via pbi_start
+        #[cfg(unix)]
+        let sid = {
+            let r = unsafe { libc::getsid(pid) };
+            if r < 0 { 0 } else { r as i32 }
+        };
+        #[cfg(not(unix))]
+        let sid: i32 = 0;
+        let start_time = bsd.pbi_start_tvsec * 1_000_000 + bsd.pbi_start_tvusec;
         procs.push(ProcInfo {
             pid,
             ppid: bsd.pbi_ppid as i32,
             pgid: bsd.pbi_pgid as i32,
+            sid,
+            start_time,
             footprint_kb,
             cpu_time_ns,
             state: state_char,
@@ -255,28 +272,36 @@ fn snapshot_ps() -> Snapshot {
             toks[5..].join(" ")
         } else { String::new() };
         if pid == 0 { continue; }
-        // Linux: derive cpu_time_ns from /proc/[pid]/stat utime+stime (ticks -> ns, 100Hz)
-        let cpu_time_ns = {
+        // Linux: derive cpu_time_ns + start_time + sid from /proc/[pid]/stat
+        let (cpu_time_ns, start_time, sid) = {
             #[cfg(target_os = "linux")]
             {
-                std::fs::read_to_string(format!("/proc/{}/stat", pid)).ok().and_then(|s| {
-                    // comm is between parentheses, fields after are space-separated
-                    let after = s.rsplit(')').next()?;
+                let stat = std::fs::read_to_string(format!("/proc/{}/stat", pid)).ok();
+                if let Some(s) = stat {
+                    let after = s.rsplit(')').next().unwrap_or("");
                     let f: Vec<&str> = after.split_whitespace().collect();
-                    // after ')' , field 14 utime is index 12? Actually after comm, field 14 is utime at idx 11 (0-based after split)
-                    // fields: 1 pid ...) state ppid pgrp session tty tpgid flags minflt cminflt majflt cmajflt utime stime
-                    // after ')' split: ["", "S", "ppid", ...]; so utime at 11, stime at 12
-                    if f.len() > 13 {
-                        let ut: u64 = f[11].parse().ok()?;
-                        let st: u64 = f[12].parse().ok()?;
-                        Some((ut + st) * 10_000_000) // 1 tick = 10ms @100Hz = 10_000_000 ns
-                    } else { None }
-                }).unwrap_or(0)
+                    if f.len() > 19 {
+                        let ut: u64 = f[11].parse().unwrap_or(0);
+                        let st: u64 = f[12].parse().unwrap_or(0);
+                        let sid_v: i32 = f[4].parse().unwrap_or(0);
+                        let start_v: u64 = f[19].parse().unwrap_or(0);
+                        ((ut + st) * 10_000_000, start_v, sid_v)
+                    } else { (0, 0, 0) }
+                } else { (0, 0, 0) }
             }
             #[cfg(not(target_os = "linux"))]
-            { 0u64 }
+            {
+                // macOS fallback ps path also gets sid/start via getsid if needed
+                #[cfg(unix)]
+                let sid_raw = unsafe { libc::getsid(pid) };
+                #[cfg(not(unix))]
+                let sid_raw: i32 = -1;
+                let sid = if sid_raw < 0 { 0 } else { sid_raw as i32 };
+                let sid = if sid < 0 { 0 } else { sid as i32 };
+                (0u64, 0u64, sid)
+            }
         };
-        procs.push(ProcInfo { pid, ppid, pgid, footprint_kb: rss, cpu_time_ns, state, cmd });
+        procs.push(ProcInfo { pid, ppid, pgid, sid, start_time, footprint_kb: rss, cpu_time_ns, state, cmd });
     }
     Snapshot { procs }
 }
