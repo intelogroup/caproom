@@ -237,6 +237,22 @@ fn snapshot_libproc() -> Option<Snapshot> {
     if procs.is_empty() { None } else { Some(Snapshot { procs }) }
 }
 
+/// Parse /proc/[pid]/stat: fields after the comm field (which may contain
+/// spaces/parens — hence rsplit on ')'). Returns (cpu_time_ns, start_time, sid).
+/// Layout after ')': 0=state 1=ppid 2=pgrp 3=session 4=tty_nr 5=tpgid ...
+/// 11=utime 12=stime ... 19=starttime.
+fn parse_proc_stat(s: &str) -> (u64, u64, i32) {
+    let after = s.rsplit(')').next().unwrap_or("");
+    let f: Vec<&str> = after.split_whitespace().collect();
+    if f.len() > 19 {
+        let ut: u64 = f[11].parse().unwrap_or(0);
+        let st: u64 = f[12].parse().unwrap_or(0);
+        let sid_v: i32 = f[3].parse().unwrap_or(0);
+        let start_v: u64 = f[19].parse().unwrap_or(0);
+        ((ut + st) * 10_000_000, start_v, sid_v)
+    } else { (0, 0, 0) }
+}
+
 fn snapshot_ps() -> Snapshot {
     use std::process::Command;
     let out = Command::new("ps")
@@ -276,18 +292,10 @@ fn snapshot_ps() -> Snapshot {
         let (cpu_time_ns, start_time, sid) = {
             #[cfg(target_os = "linux")]
             {
-                let stat = std::fs::read_to_string(format!("/proc/{}/stat", pid)).ok();
-                if let Some(s) = stat {
-                    let after = s.rsplit(')').next().unwrap_or("");
-                    let f: Vec<&str> = after.split_whitespace().collect();
-                    if f.len() > 19 {
-                        let ut: u64 = f[11].parse().unwrap_or(0);
-                        let st: u64 = f[12].parse().unwrap_or(0);
-                        let sid_v: i32 = f[4].parse().unwrap_or(0);
-                        let start_v: u64 = f[19].parse().unwrap_or(0);
-                        ((ut + st) * 10_000_000, start_v, sid_v)
-                    } else { (0, 0, 0) }
-                } else { (0, 0, 0) }
+                match std::fs::read_to_string(format!("/proc/{}/stat", pid)).ok().as_deref().map(parse_proc_stat) {
+                    Some(t) => t,
+                    None => (0, 0, 0),
+                }
             }
             #[cfg(not(target_os = "linux"))]
             {
@@ -321,5 +329,14 @@ mod tests {
     fn snapshot_current_user_has_ppid() {
         let s = snapshot_current_user();
         assert!(s.procs.iter().any(|p| p.ppid != 0), "ppid_map should be populated");
+    }
+    #[test]
+    fn proc_stat_parses_session_not_tpgid() {        // synthetic stat line: comm contains spaces+parens to force rsplit path
+        // fields after ')': state=S ppid=100 pgrp=200 session=300 tty_nr=7 tpgid=400 ...
+        let line = "1234 (my hog) S 100 200 300 7 400 4194560 1 0 0 0 5 3 0 0 0 0 0 0 123456789 0";
+        let (cpu_ns, start, sid) = parse_proc_stat(line);
+        assert_eq!(sid, 300, "session is f[3], not f[4] (tpgid)");
+        assert_eq!(cpu_ns, (5 + 3) * 10_000_000);
+        assert_eq!(start, 123456789);
     }
 }
