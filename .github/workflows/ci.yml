@@ -142,6 +142,7 @@ jobs:
 
       - name: pty exit code propagates
         run: |
+          set +e
           bin/caproom --pty --limit 512 -- bash -c 'exit 42' > /tmp/pty-ec.log 2>&1; ec=$?
           [ "$ec" = "42" ] || { echo "FAIL: expected 42, got $ec"; cat /tmp/pty-ec.log; exit 1; }
 
