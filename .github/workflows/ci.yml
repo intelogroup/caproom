@@ -135,3 +135,60 @@ jobs:
           PCT=$(bin/caproom freemem)
           echo "free=${PCT}%"
           case "$PCT" in ''|*[!0-9]*) echo "FAIL: not numeric"; exit 1;; esac
+
+      - name: pty allocates a real pty via --pty
+        run: |
+          bin/caproom --pty --limit 512 -- bash -c 'tty' | grep -Eq "/dev/(ttys|pts)" || { echo "FAIL: pty not allocated"; exit 1; }
+
+      - name: pty exit code propagates
+        run: |
+          bin/caproom --pty --limit 512 -- bash -c 'exit 42' > /tmp/pty-ec.log 2>&1; ec=$?
+          [ "$ec" = "42" ] || { echo "FAIL: expected 42, got $ec"; cat /tmp/pty-ec.log; exit 1; }
+
+      - name: pty watchdog kills tree and stubborn via pty
+        run: |
+          set +e
+          timeout 15 bin/caproom --pty --limit 64 --grace 2 -- node test/tree-hog.js > /tmp/pty-tree.log 2>&1
+          cat /tmp/pty-tree.log
+          grep -q "killing pty tree" /tmp/pty-tree.log || grep -q "killing tree" /tmp/pty-tree.log || { echo "FAIL: pty tree not killed"; exit 1; }
+          sleep 1
+          SURV=$( (pgrep -f 'Buffer.alloc' 2>/dev/null || true) | wc -l | tr -d ' ')
+          [ "$SURV" = "0" ] || { echo "FAIL: pty tree orphans $SURV"; exit 1; }
+          timeout 15 bin/caproom --pty --limit 64 --grace 2 -- node test/stubborn-hog.js > /tmp/pty-stubborn.log 2>&1
+          cat /tmp/pty-stubborn.log
+          grep -q "SIGKILLed" /tmp/pty-stubborn.log || { echo "FAIL: pty stubborn not SIGKILLed"; exit 1; }
+          sleep 1
+          SURV=$( (pgrep -f 'Buffer.alloc' 2>/dev/null || true) | wc -l | tr -d ' ')
+          [ "$SURV" = "0" ] || { echo "FAIL: pty stubborn orphans $SURV"; exit 1; }
+
+      - name: bypass and is_known_tui via --pty and --no-intercept-tty
+        run: |
+          set +e
+          # is_known_tui: tty opencode should bypass, tty myapp should be watchdog
+          mkdir -p /tmp/ci-pty-bin
+          cat > /tmp/ci-pty-bin/opencode <<'EOS'
+          #!/usr/bin/env bash
+          exec node test/fake-tui.js tui-leak-check
+          EOS
+          cat > /tmp/ci-pty-bin/myapp <<'EOS'
+          #!/usr/bin/env bash
+          exec node test/fake-tui.js tui-leak-check
+          EOS
+          chmod +x /tmp/ci-pty-bin/opencode /tmp/ci-pty-bin/myapp
+          export PATH="/tmp/ci-pty-bin:$PATH"
+          if [[ "$(uname)" == "Darwin" ]]; then
+            script -q /dev/null bin/caproom --limit 512 -- opencode > /tmp/ci-tty-op.log 2> /tmp/ci-tty-op.err
+            script -q /dev/null bin/caproom --limit 512 -- myapp > /tmp/ci-tty-my.log 2> /tmp/ci-tty-my.err
+          else
+            script -q -c "bin/caproom --limit 512 -- opencode" /dev/null > /tmp/ci-tty-op.log 2> /tmp/ci-tty-op.err
+            script -q -c "bin/caproom --limit 512 -- myapp" /dev/null > /tmp/ci-tty-my.log 2> /tmp/ci-tty-my.err
+          fi
+          grep -q "tty TUI detected" /tmp/ci-tty-op.log /tmp/ci-tty-op.err 2>/dev/null || { echo "FAIL: tty opencode not bypass"; cat /tmp/ci-tty-op.err; cat /tmp/ci-tty-op.log; exit 1; }
+          grep -q "watchdog backend" /tmp/ci-tty-my.log /tmp/ci-tty-my.err 2>/dev/null || { echo "FAIL: tty myapp not watchdog"; cat /tmp/ci-tty-my.err; cat /tmp/ci-tty-my.log; exit 1; }
+          CAPROOM_BYPASS_TTY=1 bin/caproom --limit 512 -- myapp > /tmp/ci-bypass.log 2> /tmp/ci-bypass.err
+          grep -q "bypass-tty" /tmp/ci-bypass.err || { echo "FAIL: bypass not forced"; cat /tmp/ci-bypass.err; exit 1; }
+          bin/caproom --pty --limit 512 -- echo hello | grep -q hello || { echo "FAIL: --pty echo"; exit 1; }
+
+      - name: edge-cases harness (pty/bypass)
+        run: |
+          bash scripts/edge-cases-pty.sh
