@@ -1,6 +1,7 @@
 use caproom_core::{collector, growth, pressure, process_tree::Tree, policy::{is_idle_subtree, TreeView}};
 use clap::{Parser, Subcommand};
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 
 #[derive(Parser)]
@@ -102,13 +103,26 @@ fn cmd_top(json: bool, filter_pid: Option<i32>, park_min_mb: u64) {
     }
 }
 
+#[cfg(unix)]
 fn cmd_park(pid: i32) {
     if unsafe { libc::kill(pid, libc::SIGSTOP) } != 0 { eprintln!("caproom: no such pid {}", pid); std::process::exit(1); }
     eprintln!("caproom: pid {} parked (SIGSTOP) — pages eligible for reclaim under pressure; wake with: caproom wake {}", pid, pid);
 }
+#[cfg(windows)]
+fn cmd_park(pid: i32) {
+    // Windows: use taskkill /T equivalent via suspend (stub — proper impl via NT suspend)
+    eprintln!("caproom: park not implemented on Windows for pid {}", pid);
+    std::process::exit(1);
+}
+#[cfg(unix)]
 fn cmd_wake(pid: i32) {
     if unsafe { libc::kill(pid, libc::SIGCONT) } != 0 { eprintln!("caproom: no such pid {}", pid); std::process::exit(1); }
     eprintln!("caproom: pid {} woken (SIGCONT)", pid);
+}
+#[cfg(windows)]
+fn cmd_wake(pid: i32) {
+    eprintln!("caproom: wake not implemented on Windows for pid {}", pid);
+    std::process::exit(1);
 }
 fn cmd_status(pid: i32) {
     let out = std::process::Command::new("ps").args(["-o","pid,stat,rss,etime,command=","-p",&pid.to_string()]).output().unwrap();
@@ -161,7 +175,10 @@ fn cmd_run(cmd: Vec<String>, limit_mb: u64, interval: f64, grace: u64) {
     loop {
         std::thread::sleep(interval_d);
         if let Ok(Some(status)) = child.try_wait() {
+            #[cfg(unix)]
             let code = status.code().or_else(|| status.signal().map(|s| 128 + s)).unwrap_or(0);
+            #[cfg(windows)]
+            let code = status.code().unwrap_or(0);
             std::process::exit(code);
         }
         let snap = collector::snapshot_current_user();
@@ -185,7 +202,10 @@ fn cmd_run(cmd: Vec<String>, limit_mb: u64, interval: f64, grace: u64) {
                 let view = TreeView{ root: pid, pids: &tree.pids, states: &states, footprints: &foot, is_session_leader: &leaders, cpu_delta: &cpu };
                 let idle: Vec<i32> = tree.pids.iter().copied().filter(|p| is_idle_subtree(*p, pid, &view, &ppid_map)).collect();
                 if !idle.is_empty() {
+#[cfg(unix)]
                     for p in &idle { unsafe { libc::kill(*p, libc::SIGSTOP); } }
+                    #[cfg(windows)]
+                    for _ in &idle {}
                     eprint!("\x07"); // bell — visible park signal
                     eprintln!("caproom: parked idle {} pids (wake: caproom wake {})", idle.len(), pid);
                     std::thread::sleep(std::time::Duration::from_secs(1));
@@ -198,24 +218,42 @@ fn cmd_run(cmd: Vec<String>, limit_mb: u64, interval: f64, grace: u64) {
                     }
                 }
                 eprintln!("caproom: pid {} tree {}KB exceeded {}KB cap — TERM grace {}s", pid, tree.footprint_kb, limit_kb, grace);
+#[cfg(unix)]
                 for p in &tree.pids { unsafe { libc::kill(*p, libc::SIGTERM); } }
+                #[cfg(windows)]
+                for p in &tree.pids { let _ = std::process::Command::new("taskkill").args(["/PID", &p.to_string(), "/T"]).output(); }
                 let mut waited = 0;
                 while waited < grace {
                     std::thread::sleep(std::time::Duration::from_secs(1));
                     waited += 1;
                     if let Ok(Some(s)) = child.try_wait() {
+#[cfg(unix)]
                         let code = s.code().or_else(|| s.signal().map(|sig| 128 + sig)).unwrap_or(0);
+                        #[cfg(windows)]
+                        let code = s.code().unwrap_or(0);
                         std::process::exit(code);
                     }
                 }
+                #[cfg(unix)]
                 for p in &tree.pids { unsafe { libc::kill(*p, libc::SIGKILL); } }
+                #[cfg(windows)]
+                for p in &tree.pids { let _ = std::process::Command::new("taskkill").args(["/PID", &p.to_string(), "/F", "/T"]).output(); }
                 let status = child.wait().unwrap();
+                #[cfg(unix)]
                 let code = status.code().or_else(|| status.signal().map(|sig| 128 + sig)).unwrap_or(137);
+                #[cfg(windows)]
+                let code = status.code().unwrap_or(137);
                 std::process::exit(code);
             }
         } else {
+#[cfg(unix)]
             if let Ok(Some(s)) = child.try_wait() {
                 let code = s.code().or_else(|| s.signal().map(|sig| 128 + sig)).unwrap_or(0);
+                std::process::exit(code);
+            }
+            #[cfg(windows)]
+            if let Ok(Some(s)) = child.try_wait() {
+                let code = s.code().unwrap_or(0);
                 std::process::exit(code);
             }
             // root reparented / escaped — exit cleanly, don't kill unrelated
