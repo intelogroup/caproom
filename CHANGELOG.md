@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.6 — 2026-08-24
+
+### Fixed
+- **Ghostty `suspended (tty output)` still on `opencode` startup.** Backgrounding the TUI via `"$@" &` with job control on delivers `SIGTTIN` on input and `SIGTTOU` on output — ghostty showed `[3] suspended (tty output) command opencode`. Now disables `set +m` / `stty -tostop` around the background launch in both bypass-tty and normal watchdog paths and restores after `wait`, so TUI stays usable while watchdog monitors.
+
 ## 0.7.5 — 2026-08-24
 
 ### Fixed
