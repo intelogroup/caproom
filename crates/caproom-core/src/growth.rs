@@ -1,5 +1,7 @@
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::Duration;
+use std::time::Instant;
 
 /// In-process history ring: pid -> Vec<(Instant, kb)>. No cross-process state in v1 (CLI-first).
 /// Daemon v1.1 will move this to shared UDS state. For now each `top` call estimates

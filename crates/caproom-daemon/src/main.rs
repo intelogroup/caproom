@@ -1,6 +1,5 @@
 use caproom_core::{collector, growth, pressure, process_tree::Tree};
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Session: one tree root with risk score
 #[derive(Debug, Clone, serde::Serialize)]
@@ -68,7 +67,7 @@ fn main() {
         growth_ring.prune_stale(&roots);
         sessions.sort_by(|a,b| b.risk.partial_cmp(&a.risk).unwrap());
         // print top 5 riskiest
-        if iter % 5 == 0 || sessions.iter().any(|s| s.footprint_kb >= eff_kb) {
+        if iter.is_multiple_of(5) || sessions.iter().any(|s| s.footprint_kb >= eff_kb) {
             eprintln!("--- iter {} free {}% eff {}MB sessions {} ---", iter, free, eff_kb/1024, sessions.len());
             for s in sessions.iter().take(5) {
                 eprintln!(" pid {:>6} risk {:>6.1} {}MB g {:>5}KB/s fanout {} crit {:?}s -- {}", s.pid, s.risk, s.footprint_kb/1024, s.growth_kb_s, s.pids, s.secs_to_crit.map(|v| format!("{:.0}", v)).unwrap_or("∞".into()), s.cmd);

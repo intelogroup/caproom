@@ -22,7 +22,7 @@ impl AgentAdapter for Opencode {
 }
 
 pub fn adapter_for(cmd: &str) -> Box<dyn AgentAdapter> {
-    match cmd.split('/').last().unwrap_or(cmd) {
+    match cmd.split('/').next_back().unwrap_or(cmd) {
         "claude" => Box::new(Claude),
         "opencode" => Box::new(Opencode),
         _ => Box::new(GenericPty),

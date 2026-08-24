@@ -64,7 +64,7 @@ pub fn handle_top(pid: Option<i32>) -> TopResponse {
     // prune stale after
     let ids: Vec<i32> = processes.iter().map(|p| p.pid).collect();
     ring.prune_stale(&ids);
-    processes.sort_by(|a,b| b.tree_rss_kb.cmp(&a.tree_rss_kb));
+    processes.sort_by_key(|a| std::cmp::Reverse(a.tree_rss_kb));
     TopResponse{ schema: 1, ts: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(), limit_mb_default: 4096, processes }
 }
 
@@ -80,9 +80,9 @@ pub fn handle_park(pid: i32) -> serde_json::Value {
     {
         let r = unsafe { libc::kill(pid, libc::SIGSTOP) };
         if r == 0 {
-            return serde_json::json!({"parked": [pid], "eligible_kb": 0, "state": "parked"});
+            serde_json::json!({"parked": [pid], "eligible_kb": 0, "state": "parked"})
         } else {
-            return serde_json::json!({"error": format!("no such pid {}", pid)});
+            serde_json::json!({"error": format!("no such pid {}", pid)})
         }
     }
     #[cfg(not(unix))]
@@ -112,9 +112,9 @@ pub fn handle_park_tree(pid: i32) -> serde_json::Value {
                     if unsafe { libc::kill(*p, libc::SIGSTOP) } == 0 { parked.push(*p); }
                 }
             }
-            return serde_json::json!({"parked": parked, "tree_pid": pid, "tree_pids": tree.pids, "eligible_kb": tree.footprint_kb});
+            serde_json::json!({"parked": parked, "tree_pid": pid, "tree_pids": tree.pids, "eligible_kb": tree.footprint_kb})
         } else {
-            return serde_json::json!({"error": format!("no such pid {}", pid)});
+            serde_json::json!({"error": format!("no such pid {}", pid)})
         }
     }
     #[cfg(not(unix))]
@@ -146,7 +146,7 @@ pub fn handle_wake_tree(pid: i32) -> serde_json::Value {
             for p in &tree.pids {
                 if unsafe { libc::kill(*p, libc::SIGCONT) } == 0 { woken.push(*p); }
             }
-            return serde_json::json!({"woken": woken, "tree_pid": pid, "tree_pids": tree.pids});
+            serde_json::json!({"woken": woken, "tree_pid": pid, "tree_pids": tree.pids})
         } else {
             // fallback single
             let r = unsafe { libc::kill(pid, libc::SIGCONT) };

@@ -1,5 +1,7 @@
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::Duration;
+use std::time::Instant;
 
 /// Tracks per-pid cpu_time_ns and computes fractional CPU usage (1.0 = 100% one core).
 /// Same pattern as GrowthRing but for cpu. v1 CLI keeps this in-process; daemon v1.1 shares via UDS.
