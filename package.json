@@ -1,7 +1,7 @@
 {
   "name": "caproom",
-  "version": "0.7.4",
-  "description": "Memory-cap any command (AI coding agents, builds, background jobs) on macOS, Linux, and Windows — real enforcement via Docker cgroups, Windows Job Objects, or a polling watchdog, plus park/wake to reclaim idle process memory without killing.",
+  "version": "0.7.5",
+  "description": "Memory-cap any command (AI coding agents, builds, background jobs) on macOS, Linux, and Windows \u2014 real enforcement via Docker cgroups, Windows Job Objects, or a polling watchdog, plus park/wake to reclaim idle process memory without killing.",
   "bin": {
     "caproom": "bin/caproom.js",
     "caproom-mcp": "bin/caproom-mcp.js"

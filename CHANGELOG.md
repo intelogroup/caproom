@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.5 — 2026-08-24
+
+### Fixed
+- **Ghostty `suspended (tty output)` on TUI startup.** Clearing stale mouse/alt-screen modes (`?1000/1002/1003/1006`) via `printf >/dev/tty` while caproom backgrounds the TUI triggered `SIGTTOU` when `tostop` was set — ghostty showed `[[<35;25;15M` as suspended jobs `[3] 1980`. Now disables `tostop` before the pre-clear in all three paths (normal watchdog, PTY, bypass-tty) so the clear never suspends.
+
 ## 0.7.4 — 2026-08-24
 
 ### Added
