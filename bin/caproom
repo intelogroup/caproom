@@ -925,6 +925,7 @@ run_watchdog() {
     if [[ ! -f "$_cap_bin" ]]; then
       _cap_bin="$(command -v caproom 2>/dev/null || echo "$_cap_bin")"
     fi
+    set +m 2>/dev/null || true
     "$@" &
     local _tui_pid=$!
     # Fire-and-forget watch; it exits when _tui_pid exits. Suppressed so it
@@ -932,6 +933,7 @@ run_watchdog() {
     bash "$_cap_bin" watch --threshold-mb "$LIMIT_MB" --interval "$INTERVAL" --auto-park --json "$_tui_pid" >/dev/null 2>&1 &
     local _watch_pid=$!
     wait "$_tui_pid"
+    set -m 2>/dev/null || true
     local _rc=$?
     # Best-effort cleanup of the detached watcher (it should already exit
     # via all-exited, but kill is cheap if TUI exited fast).
@@ -959,6 +961,7 @@ run_watchdog() {
       || { [[ -t 0 ]] && stty sane </dev/tty 2>/dev/null || true; }
     printf '\033[?1049l\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?2004l\033[?25h' >/dev/tty 2>/dev/null || true
   }
+  set +m 2>/dev/null || true
   "$@" &
   local pid=$!
   local exit_code=0
@@ -1003,6 +1006,7 @@ run_watchdog() {
     sleep "$INTERVAL"
   done
   wait "$pid" || exit_code=$?
+  set -m 2>/dev/null || true
   exit "$exit_code"
 }
 
