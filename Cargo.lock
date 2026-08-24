@@ -60,7 +60,7 @@ checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 
 [[package]]
 name = "caproom"
-version = "0.7.6"
+version = "0.8.0"
 dependencies = [
  "caproom-agents",
  "caproom-core",
@@ -73,7 +73,7 @@ dependencies = [
 
 [[package]]
 name = "caproom-agents"
-version = "0.7.6"
+version = "0.8.0"
 dependencies = [
  "caproom-core",
  "serde",
@@ -81,7 +81,7 @@ dependencies = [
 
 [[package]]
 name = "caproom-core"
-version = "0.7.6"
+version = "0.8.0"
 dependencies = [
  "libc",
  "nix",
@@ -91,7 +91,7 @@ dependencies = [
 
 [[package]]
 name = "caproom-mcp"
-version = "0.7.6"
+version = "0.8.0"
 dependencies = [
  "caproom-core",
  "serde",
