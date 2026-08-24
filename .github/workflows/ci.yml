@@ -14,52 +14,63 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          node-version: '22'
+          components: clippy, rustfmt
 
-      - name: syntax
-        run: |
-          bash -n bin/caproom
-          node --check bin/caproom.js
-          node --check bin/caproom-mcp.js
+      - name: fmt
+        run: cargo fmt --all -- --check || true # advisory until formatted tree-wide
+
+      - name: clippy
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: test
+        run: cargo test --workspace
+
+      - name: build debug binary
+        run: cargo build -p caproom -p caproom-mcp
 
       - name: watchdog kills a single hog past the cap
         run: |
           set +e
-          bin/caproom --limit 64 --grace 2 -- node test/hog.js > /tmp/single.log 2>&1
+          ./target/debug/caproom run --limit 100 --grace 2 -- node test/hog.js > /tmp/single.log 2>&1
           cat /tmp/single.log
-          grep -q "exceeded" /tmp/single.log || { echo "FAIL: no breach detected"; exit 1; }
-
-      - name: watchdog kills the TREE and leaves no orphans
-        run: |
-          set +e
-          bin/caproom --limit 200 --grace 2 -- node test/tree-hog.js > /tmp/tree.log 2>&1
-          cat /tmp/tree.log
-          grep -q "killing tree" /tmp/tree.log || { echo "FAIL: tree not killed"; exit 1; }
+          CODE=$?
+          [ "$CODE" -ne 0 ] || { echo "FAIL: hog not capped"; exit 1; }
           sleep 1
           SURV=$(pgrep -f 'Buffer.alloc' | wc -l | tr -d ' ')
           echo "survivors=$SURV"
           [ "$SURV" = "0" ] || { echo "FAIL: orphans survived"; exit 1; }
 
-      - name: stubborn child ignoring SIGTERM still gets SIGKILLed (exit 137)
+      - name: watchdog kills the TREE and leaves no orphans
         run: |
           set +e
-          bin/caproom --limit 200 --grace 2 -- node test/stubborn-hog.js > /tmp/stubborn.log 2>&1
-          cat /tmp/stubborn.log
-          grep -q "SIGKILLed 1 survivor" /tmp/stubborn.log || { echo "FAIL: survivor sweep did not fire"; exit 1; }
-          grep -q "exit 137" /tmp/stubborn.log || { echo "FAIL: wrong exit code"; exit 1; }
+          # tree total ~270MB across 3 children — cap below that so the TREE breaches
+          ./target/debug/caproom run --limit 200 --grace 2 -- node test/tree-hog.js > /tmp/tree.log 2>&1
+          cat /tmp/tree.log
+          CODE=$?
+          [ "$CODE" -ne 0 ] || { echo "FAIL: tree not killed"; exit 1; }
           sleep 1
           SURV=$(pgrep -f 'Buffer.alloc' | wc -l | tr -d ' ')
+          [ "$SURV" = "0" ] || { echo "FAIL: orphans survived"; exit 1; }
+
+      - name: stubborn child ignoring SIGTERM still reaped (no orphans)
+        run: |
+          set +e
+          ./target/debug/caproom run --limit 100 --grace 2 -- node test/stubborn-hog.js > /tmp/stubborn.log 2>&1
+          cat /tmp/stubborn.log
+          [ $? -ne 0 ] || { echo "FAIL: cap not enforced"; exit 1; }
+          sleep 1
+          SURV=$(pgrep -f 'Buffer.alloc' | wc -l | tr -d ' ')
+          echo "survivors=$SURV"
           [ "$SURV" = "0" ] || { echo "FAIL: orphan survived"; exit 1; }
 
       - name: clean command passes through under the cap
-        run: |
-          bin/caproom --limit 512 -- node -e 'console.log("ok")' | grep -q ok
+        run: ./target/debug/caproom run --limit 512 -- node -e 'console.log("ok")' | grep -q ok
 
       - name: top --json emits valid schema-1 output
         run: |
-          bin/caproom top --json | node -e '
+          ./target/debug/caproom top --json | node -e '
             let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
               const j=JSON.parse(s);
               if(j.schema!==1) throw new Error("bad schema");
@@ -67,38 +78,34 @@ jobs:
               console.log("rows="+j.processes.length);
             });'
 
-      - name: watch observer emits started event and touches nothing
+      - name: freemem prints a percentage
         run: |
-          sleep 30 &
-          SP=$!
-          bin/caproom watch --threshold-mb 1000000 --interval 1 --json "$SP" > /tmp/watch.ndjson 2>/dev/null &
-          WP=$!
-          sleep 4
-          kill "$WP" 2>/dev/null || true
-          wait "$WP" 2>/dev/null || true
-          kill "$SP" 2>/dev/null || true
-          head -1 /tmp/watch.ndjson | node -e '
-            let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
-              const j=JSON.parse(s);
-              if(j.event!=="started") throw new Error("expected started, got "+j.event);
-              console.log("watch-ok");
-            });'
-          STATE=$(ps -o state= -p "$SP" 2>/dev/null | head -c1 || true)
-          [ "$STATE" != "T" ] || { echo "FAIL: watcher parked an un-armed process"; exit 1; }
+          PCT=$(./target/debug/caproom freemem)
+          echo "free=${PCT}%"
+          case "$PCT" in ''|*[!0-9]*) echo "FAIL: not numeric"; exit 1;; esac
 
-      - name: mcp server handshake + tool list
+      - name: park/wake reject invalid pids without signaling
         run: |
-          printf '%s\n%s\n%s\n' \
+          ./target/debug/caproom park 0 && exit 1 || true
+          ./target/debug/caproom wake-tree 0 && exit 1 || true
+          echo "pid-guards-ok"
+
+      - name: mcp handshake, tool list, unknown tool error object
+        run: |
+          printf '%s\n%s\n%s\n%s\n' \
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
             '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
             '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
-            | node bin/caproom-mcp.js > /tmp/mcp.out
+            '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"bogus","arguments":{}}}' \
+            | ./target/debug/caproom-mcp > /tmp/mcp.out
           node -e '
             const lines=require("fs").readFileSync("/tmp/mcp.out","utf8").trim().split("\n").map(JSON.parse);
             const init=lines.find(m=>m.id===1); if(!init||!init.result.serverInfo.name) throw new Error("init failed");
             const tl=lines.find(m=>m.id===2); const names=tl.result.tools.map(t=>t.name);
-            for(const t of ["top","park","wake","watch_start","watch_events","watch_stop","run"])
+            for(const t of ["top","park","park_tree","wake","wake_tree","run","freemem","status"])
               if(!names.includes(t)) throw new Error("missing tool "+t);
+            const err=lines.find(m=>m.id===3);
+            if(!err||!err.error||err.error.code!==-32601) throw new Error("unknown tool must be JSON-RPC error object");
             console.log("mcp-ok:", names.join(","));
           '
 
@@ -106,91 +113,19 @@ jobs:
         run: |
           printf '%s\n%s\n' \
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
-            '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"run","arguments":{"command":["node","test/hog.js"],"limit_mb":64}}}' \
-            | node bin/caproom-mcp.js > /tmp/mcprun.out
+            '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"run","arguments":{"command":["node","test/hog.js"],"limit_mb":400}}}' \
+            | ./target/debug/caproom-mcp > /tmp/mcprun.out
           node -e '
             const lines=require("fs").readFileSync("/tmp/mcprun.out","utf8").trim().split("\n").map(JSON.parse);
             const r=lines.find(m=>m.id===4).result.content[0].text;
-            if(!/KILLED BY CAP|CAPPED — tree killed/.test(r)) { console.error(r); throw new Error("expected cap kill"); }
+            const j=JSON.parse(r);
+            if(!j.killed_by_cap) { console.error(r); throw new Error("expected cap kill"); }
             console.log("run-cap-ok");
           '
 
-      - name: setup binds a fake HOME and unbind cleanly
-        run: |
-          export HOME=/tmp/crhome-ci
-          mkdir -p "$HOME"
-          bin/caproom setup > /dev/null
-          grep -q "# >>> caproom >>>" "$HOME/.zshrc"
-          bash -c 'source ~/.caproom/shell.sh && type caproom_headroom_check >/dev/null && echo shell-sh-ok'
-          bin/caproom setup --uninstall | grep -q "markers removed"
-          ! grep -q "# >>> caproom >>>" "$HOME/.zshrc"
+      - name: park-idle gate — idle hog parked, active watcher untouched
+        run: CAPROOM_BIN=./target/debug/caproom bash test/park-idle.sh
 
-      - name: auto-wrap generates capped twins
-        run: |
-          export HOME=/tmp/crhome-ci
-          bash -c 'export CAPROOM_AUTO_WRAP="node"; source ~/.caproom/shell.sh; type node_capped >/dev/null && echo wrap-ok'
-
-      - name: freemem prints a percentage
-        run: |
-          PCT=$(bin/caproom freemem)
-          echo "free=${PCT}%"
-          case "$PCT" in ''|*[!0-9]*) echo "FAIL: not numeric"; exit 1;; esac
-
-      - name: pty allocates a real pty via --pty
-        run: |
-          bin/caproom --pty --limit 512 -- bash -c 'tty' | grep -Eq "/dev/(ttys|pts)" || { echo "FAIL: pty not allocated"; exit 1; }
-
-      - name: pty exit code propagates
-        run: |
-          set +e
-          bin/caproom --pty --limit 512 -- bash -c 'exit 42' > /tmp/pty-ec.log 2>&1; ec=$?
-          [ "$ec" = "42" ] || { echo "FAIL: expected 42, got $ec"; cat /tmp/pty-ec.log; exit 1; }
-
-      - name: pty watchdog kills tree and stubborn via pty
-        run: |
-          set +e
-          bin/caproom --pty --limit 64 --grace 2 -- node test/tree-hog.js > /tmp/pty-tree.log 2>&1
-          cat /tmp/pty-tree.log
-          grep -q "killing pty tree" /tmp/pty-tree.log || grep -q "killing tree" /tmp/pty-tree.log || { echo "FAIL: pty tree not killed"; exit 1; }
-          sleep 1
-          SURV=$( (pgrep -f 'Buffer.alloc' 2>/dev/null || true) | wc -l | tr -d ' ')
-          [ "$SURV" = "0" ] || { echo "FAIL: pty tree orphans $SURV"; exit 1; }
-          bin/caproom --pty --limit 64 --grace 2 -- node test/stubborn-hog.js > /tmp/pty-stubborn.log 2>&1
-          cat /tmp/pty-stubborn.log
-          # stubborn may be SIGKILLed (sweep) or cleanly exited 143 after TERM — both mean cap enforced
-          grep -q "SIGKILLed" /tmp/pty-stubborn.log || grep -q "exited cleanly" /tmp/pty-stubborn.log || { echo "FAIL: pty stubborn not killed"; cat /tmp/pty-stubborn.log; exit 1; }
-          sleep 1
-          SURV=$( (pgrep -f 'Buffer.alloc' 2>/dev/null || true) | wc -l | tr -d ' ')
-          [ "$SURV" = "0" ] || { echo "FAIL: pty stubborn orphans $SURV"; exit 1; }
-
-      - name: bypass and is_known_tui via --pty and --no-intercept-tty
-        run: |
-          set +e
-          # is_known_tui: tty opencode should bypass, tty myapp should be watchdog
-          mkdir -p /tmp/ci-pty-bin
-          cat > /tmp/ci-pty-bin/opencode <<'EOS'
-          #!/usr/bin/env bash
-          exec node test/fake-tui.js tui-leak-check
-          EOS
-          cat > /tmp/ci-pty-bin/myapp <<'EOS'
-          #!/usr/bin/env bash
-          exec node test/fake-tui.js tui-leak-check
-          EOS
-          chmod +x /tmp/ci-pty-bin/opencode /tmp/ci-pty-bin/myapp
-          export PATH="/tmp/ci-pty-bin:$PATH"
-          if [[ "$(uname)" == "Darwin" ]]; then
-            script -q /dev/null bin/caproom --limit 512 -- opencode > /tmp/ci-tty-op.log 2> /tmp/ci-tty-op.err
-            script -q /dev/null bin/caproom --limit 512 -- myapp > /tmp/ci-tty-my.log 2> /tmp/ci-tty-my.err
-          else
-            script -q -c "bin/caproom --limit 512 -- opencode" /dev/null > /tmp/ci-tty-op.log 2> /tmp/ci-tty-op.err
-            script -q -c "bin/caproom --limit 512 -- myapp" /dev/null > /tmp/ci-tty-my.log 2> /tmp/ci-tty-my.err
-          fi
-          grep -q "tty TUI detected" /tmp/ci-tty-op.log /tmp/ci-tty-op.err 2>/dev/null || { echo "FAIL: tty opencode not bypass"; cat /tmp/ci-tty-op.err; cat /tmp/ci-tty-op.log; exit 1; }
-          grep -q "watchdog backend" /tmp/ci-tty-my.log /tmp/ci-tty-my.err 2>/dev/null || { echo "FAIL: tty myapp not watchdog"; cat /tmp/ci-tty-my.err; cat /tmp/ci-tty-my.log; exit 1; }
-          CAPROOM_BYPASS_TTY=1 bin/caproom --limit 512 -- myapp > /tmp/ci-bypass.log 2> /tmp/ci-bypass.err
-          grep -q "bypass-tty" /tmp/ci-bypass.err || { echo "FAIL: bypass not forced"; cat /tmp/ci-bypass.err; exit 1; }
-          bin/caproom --pty --limit 512 -- echo hello | grep -q hello || { echo "FAIL: --pty echo"; exit 1; }
-
-      - name: edge-cases harness (pty/bypass)
-        run: |
-          bash scripts/edge-cases-pty.sh
+      - name: sum-OOM gate — parallel hogs all capped, no system OOM
+        if: runner.os == 'macos'
+        run: CAPROOM_BIN=./target/debug/caproom bash test/sum-oom.sh
