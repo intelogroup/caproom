@@ -191,9 +191,13 @@ mod tests {
     }
     #[test]
     fn park_wake_roundtrip() {
-        let pid = std::process::id() as i32; // self, don't actually park self
+        // real assertion: filtering by our own pid must return exactly this
+        // process, running, from the live snapshot
+        let pid = std::process::id() as i32;
         let v = handle_top(Some(pid));
-        assert!(v.processes.is_empty() || !v.processes.is_empty()); // just ensure top works with pid filter
+        assert_eq!(v.processes.len(), 1, "self pid filter must yield one row");
+        assert_eq!(v.processes[0].pid as u32, std::process::id());
+        assert_eq!(v.processes[0].state, State::Running);
     }
     #[test]
     fn invalid_pid_rejected_without_signalling() {
