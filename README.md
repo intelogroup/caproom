@@ -9,7 +9,7 @@ Prevent RAM OOM for long-running terminal coding agents, builds, and background 
 
 macOS has no reliable way to cap a process's memory from userspace. A runaway process — a leaking build tool, an AI agent stuck in a loop, a stray `find /` — has nothing standing between it and system OOM. `caproom` fills that gap with a host-native polling watchdog that actually enforces a limit on the whole process tree.
 
-## What it does (Rust-only v0.8.2)
+## What it does (Rust-only v0.9.0)
 
 ```
 caproom --limit <mb> -- <command> [args...]
@@ -21,9 +21,9 @@ Single binary `bin/caproom-rs` (`1.2M`, `target/release/caproom` copy) — no ba
 
 Core mechanism:
 
-- **Collector:** `proc_listallpids` + `proc_pidinfo PROC_PIDTBSDINFO` + `proc_pid_rusage ri_phys_footprint` (libproc, not `ps`). Bench `13ms` vs `ps` `20ms` per `top --json` (`scripts/bench_phys_vs_ps.sh`). Measures **phys_footprint** (Mach `TASK_VM_INFO`, Jetsam/Activity Monitor truth) — not RSS. RSS overcounts shared libs.
+- **Collector:** `proc_listallpids` + `proc_pidinfo PROC_PIDTBSDINFO/TASKINFO` + `proc_pid_rusage ri_phys_footprint` (libproc, not `ps`). Measures **phys_footprint** (Mach `TASK_VM_INFO`, Jetsam/Activity Monitor truth) — not RSS. RSS overcounts shared libs. R/S state comes from TASKINFO `pti_numrunning`, because `pbi_status` reports SRUN for processes blocked in `time.sleep`.
 - **Tree walk:** whole process tree per poll (agents keep memory in children — MCP servers, bundler daemons, headless browsers — while parent RSS stays flat). Ancestry walk depth 64, reparented to `launchd`/`init` (ppid 1) escapes.
-- **Parking predicate `is_idle_subtree`:** `still_in_tree` + `footprint >=512KB` + `!is_session_leader` (`pgid == pid`, foreground group never parks) + `cpu_delta <0.02` (2% over 500ms window via `CpuRing` from `ri_user_time+ri_system_time` delta). Dropped `pbi_status S|I` gate in 0.8.0 — multithreaded Python/Node reports `R` while sleeping in `time.sleep`.
+- **Parking predicate `is_idle_subtree`:** `still_in_tree` + `footprint >=512KB` + `!is_session_leader` (`pid == sid` primary, `pgid == pid` fallback — foreground group never parks) + `cpu_delta <0.02` (2% over 500ms window via `CpuRing` from `ri_user_time+ri_system_time` delta). Dropped `pbi_status S|I` gate in 0.8.0 — multithreaded Python/Node reports `R` while sleeping in `time.sleep`.
 - **Escalation:** park idle subtrees (`SIGSTOP`) → resample after 1s → only `TERM` → grace `5s` → `KILL` if still over `effective_limit`. `effective_limit = limit * (80 + 20*free_pct/15)/100` (free_pct from `vm_stat`/`MemAvailable`), so low headroom lowers trigger but doesn't escalate without park.
 - **Polling-only v1:** `vm_stat`/`free_mem_pct` every `200ms`. `dispatch_source_memorypressure` event-driven (`0% idle`) is **not built** — `pressure::try_init_pressure_source() -> false` and logs `poll fallback 200ms (dispatch unavailable, v1.1 daemon will use GCD source)`. Deferred to daemon v1.1 single Mach source.
 - **Docker backend dropped:** no `--docker`/`--image` in Rust (native only). `--pty`/`--no-intercept-tty`/`--force-watchdog`/`init`/`setup`/`SAFE_RUN` also dropped — they were bash-only.
@@ -46,7 +46,7 @@ npm install -g caproom
 npm rm -g caproom; nvm use system; hash -r; which caproom # should be ~/.cargo/bin/caproom
 ```
 
-Binary: `~/.cargo/bin/caproom` `v0.8.2`, `caproom --help` prints `Memory-cap any command — Rust CLI-first v1`.
+Binary: `~/.cargo/bin/caproom` `v0.9.0`, `caproom --help` prints `Memory-cap any command — Rust CLI-first v1`.
 
 ## Usage
 
@@ -123,7 +123,7 @@ caproom wake-tree <pid>   # SIGCONT whole tree
 
 Verified on macOS: parked RSS dropped `~90%` (345MB → 37MB) once real pressure hit. No reclaim while system idle/unpressured — rides kernel compressor, doesn't force. **Caveat:** parked process does zero work while stopped — only park something actually idle (watcher, finished subprocess), never the process an agent is waiting on.
 
-Predicate `is_idle_subtree` protects: `cpu_delta <0.02` (`CpuRing` 500ms window, first sample assumes busy `1.0` so active watcher not parked on first sight) and `is_session_leader` (`pgid == pid`) never parks foreground. Tested with real `python3 -c "while True: pass"` busy vs `sleep` idle — `park_does_not_hang_active_watcher` proves.
+Predicate `is_idle_subtree` protects: `cpu_delta <0.02` (`CpuRing` 500ms window, first sample assumes busy `1.0` so active watcher not parked on first sight) and `is_session_leader` (`pid == sid` primary, `pgid == pid` fallback) never parks foreground. Tested with real `python3 -c "while True: pass"` busy vs `sleep` idle — `park_does_not_hang_active_watcher` proves.
 
 ## `caproom calibrate` — suggest limit
 
@@ -131,18 +131,20 @@ Prints total RAM, free %, top 3 trees footprint, and `suggested --limit` (60% to
 
 ## MCP — typed surface
 
-`crates/caproom-mcp` is hand-rolled `serde` JSON with strictly typed enums (`state: parked|running|zombie`, `reason_code: PARK_IDLE|GROWTH_RATE|PRESSURE|NONE`), no `message` string. Tools v1: `top`, `park`, `wake`. `watch_*`/`run` + `rmcp` deferred to v1.1 with tokio isolated to MCP crate. `bin/caproom-mcp.js` shim removed in 0.8.1.
+`crates/caproom-mcp` is hand-rolled `serde` JSON with strictly typed enums (`state: parked|running|zombie`, `reason_code: PARK_IDLE|GROWTH_RATE|PRESSURE|NONE`), no `message` string. Tools v1 (8): `top`, `park`, `park_tree`, `wake`, `wake_tree`, `run`, `freemem`, `status`. Unknown tools return proper JSON-RPC error objects (`-32601`). `watch_*` + `rmcp` deferred to v1.1 with tokio isolated to MCP crate.
 
 ## Windows
 
 Same `run`/`top`/`park`/`wake` via `cfg(unix)`/`cfg(windows)` guards (`cargo check --target x86_64-pc-windows-msvc` passes). `park`/`wake` are stubs (`park not implemented on Windows`) — `EmptyWorkingSet` not wired in Rust v1. Windows watchdog `taskkill /T /F` for TERM/KILL, no grace, `--grace` ignored. No Job Object hard cap — Rust is watchdog-only.
 
-## Rust port status (current `main` 0.8.2)
+## Rust port status (current `main` 0.9.0)
 
-- ✅ `phys_footprint` via libproc `13ms` vs `ps` `20ms`, typed `top --json` with `growth_kb_s`/`reason_code`/`free_pct`
-- ✅ `is_idle_subtree` ancestry walk + `cpu_delta` (`CpuRing` first-sample busy) + `is_session_leader` (`pid==sid` + `pid==pgid` fallback) wired, `S|I` gate dropped, `23` tests incl. `park_does_not_hang_active_watcher`
+- ✅ `phys_footprint` via libproc, typed `top --json` with `growth_kb_s`/`reason_code`/`free_pct`
+- ✅ `is_idle_subtree` ancestry walk + `cpu_delta` (`CpuRing` first-sample busy) + `is_session_leader` (`pid==sid` + `pid==pgid` fallback) wired, `S|I` gate dropped, `28` tests incl. `park_does_not_hang_active_watcher`
+- ✅ R/S via TASKINFO `pti_numrunning` (`pbi_status` reports SRUN for sleepers); pid-list buffer grows past 8192 instead of silent truncation
 - ✅ `growth` contextual `should_enforce_growth` (70% + pressure + <5min breach, 600s for >1MB/s) not bare `>200 KB/s`; `pressure` cached `hw.memsize OnceLock` + `free 800ms/200ms`
 - ✅ `park-tree`/`wake-tree` tree-aware + `(pid,start_time)` reuse guard (`pbi_start` / `/proc/starttime` via `getsid`), `is_session_leader` fixes `Ghostty→tmux` conflation
+- ✅ MCP: 8 tools, invalid-pid guards (kill(0)/kill(1) rejected), park_tree reuse guard, JSON-RPC error objects, EPIPE-safe writes
 - ✅ `effective_limit = limit * (80 + 20*free_pct/15)/100` pressure-aware threshold
 - ❌ Not yet: `dispatch_source_memorypressure` event-driven (polling-only v1), `rmcp` port, daemon+arbiter. See `docs/plan-caproom-rust.md` for reality vs pitch.
 
