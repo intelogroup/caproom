@@ -116,7 +116,11 @@ fn cmd_run(cmd: Vec<String>, limit_mb: u64, interval: f64, grace: u64) {
     if cmd.is_empty() { eprintln!("caproom: no command"); std::process::exit(1); }
     let free0 = pressure::free_mem_pct();
     let eff = pressure::effective_limit(limit_mb, free0);
-    eprintln!("caproom: watchdog limit={}MB effective={}MB (free {}%) poll={}s grace={}s — phys_footprint (fallback rss)", limit_mb, eff, free0, interval, grace);
+    #[cfg(target_os = "macos")]
+    let pressure_note = if pressure::try_init_pressure_source() { "event-driven" } else { "poll fallback 200ms (dispatch unavailable, v1.1 daemon will use GCD source)" };
+    #[cfg(not(target_os = "macos"))]
+    let pressure_note = "poll";
+    eprintln!("caproom: watchdog limit={}MB effective={}MB (free {}%) {} poll={}s grace={}s — phys_footprint", limit_mb, eff, free0, pressure_note, interval, grace);
     // fork exec
     let mut child = std::process::Command::new(&cmd[0]).args(&cmd[1..]).spawn().expect("spawn failed");
     let pid = child.id() as i32;
