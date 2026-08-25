@@ -1,3 +1,11 @@
+## 0.9.2 — 2026-08-25
+
+### Fixed
+- **MCP `park`/`park_tree` could freeze the calling agent/terminal.** No guard existed against a caller-supplied pid matching `caproom-mcp` itself or any ancestor (agent, terminal, shell) — SIGSTOP there is unrecoverable, since a stopped process can't call `wake` back. Verified against a live sacrificial session before the fix (SIGSTOP landed unopposed) and after (rejected with an explicit error, unrelated pids unaffected). `wake`/`wake_tree` left unguarded — SIGCONT on an already-running self/ancestor is a kernel no-op, zero risk.
+
+### Added
+- **Park offload sink via `--offload=headroom`** — park was eligibility-only, no reclaim on idle. New branch before TERM: freeze idle subtree, `headroom_compress(pid, log+snapshot)` (~67% reduction), resample after 1s — relieved skips TERM, else keeps STOP and the stash hash for `wake --retrieve`/`wake --headroom`. Byte-exact stash. Opt-in flag, default off. No daemon, no `dispatch_source`, no arbiter — deferred to v1.1.
+
 ## 0.9.1 — 2026-08-24
 
 ### Fixed
