@@ -394,14 +394,11 @@ fn snapshot_ps() -> Snapshot {
         let (cpu_time_ns, start_time, sid) = {
             #[cfg(target_os = "linux")]
             {
-                match std::fs::read_to_string(format!("/proc/{}/stat", pid))
+                std::fs::read_to_string(format!("/proc/{}/stat", pid))
                     .ok()
                     .as_deref()
                     .map(parse_proc_stat)
-                {
-                    Some(t) => t,
-                    None => (0, 0, 0),
-                }
+                    .unwrap_or_default()
             }
             #[cfg(not(target_os = "linux"))]
             {
