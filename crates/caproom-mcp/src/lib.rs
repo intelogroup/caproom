@@ -110,12 +110,34 @@ fn valid_pid(pid: i32) -> bool {
     pid > 1
 }
 
+/// Self + every ancestor up to (not including) pid 1 — the caproom-mcp
+/// process itself plus whatever spawned it (agent, terminal, shell). SIGSTOP
+/// on any of these is unrecoverable: a stopped process can't call `wake`
+/// back, so this would freeze the very session driving caproom.
+fn protected_pids(snap: &caproom_core::collector::Snapshot) -> std::collections::HashSet<i32> {
+    let ppid_map = snap.ppid_map();
+    let mut set = std::collections::HashSet::new();
+    let mut cur = std::process::id() as i32;
+    set.insert(cur);
+    while let Some(&parent) = ppid_map.get(&cur) {
+        if parent <= 1 || !set.insert(parent) {
+            break;
+        }
+        cur = parent;
+    }
+    set
+}
+
 pub fn handle_park(pid: i32) -> serde_json::Value {
     if !valid_pid(pid) {
         return serde_json::json!({"error": format!("invalid pid {} — must be > 1", pid)});
     }
     #[cfg(unix)]
     {
+        let snap = caproom_core::collector::snapshot_current_user();
+        if protected_pids(&snap).contains(&pid) {
+            return serde_json::json!({"error": format!("refusing to park {} — self or ancestor of caproom-mcp, would freeze this session", pid)});
+        }
         let r = unsafe { libc::kill(pid, libc::SIGSTOP) };
         if r == 0 {
             serde_json::json!({"parked": [pid], "eligible_kb": 0, "state": "parked"})
@@ -136,11 +158,18 @@ pub fn handle_park_tree(pid: i32) -> serde_json::Value {
     #[cfg(unix)]
     {
         let snap = caproom_core::collector::snapshot_current_user();
+        let protected = protected_pids(&snap);
+        if protected.contains(&pid) {
+            return serde_json::json!({"error": format!("refusing to park {} — self or ancestor of caproom-mcp, would freeze this session", pid)});
+        }
         if let Some(tree) = caproom_core::process_tree::Tree::build(pid, &snap) {
             // PID reuse guard: skip pids whose start_time changed since snapshot
             // (parity with cli cmd_park_tree)
             let mut parked = Vec::new();
             for p in &tree.pids {
+                if protected.contains(p) {
+                    continue;
+                }
                 if let Some(orig) = snap.by_pid(*p) {
                     if orig.start_time != 0 {
                         if let Some(cur) =
@@ -270,6 +299,30 @@ mod tests {
         assert_eq!(v.processes.len(), 1, "self pid filter must yield one row");
         assert_eq!(v.processes[0].pid as u32, std::process::id());
         assert_eq!(v.processes[0].state, State::Running);
+    }
+    #[test]
+    fn park_refuses_self_and_ancestor() {
+        // targeting our own pid or an ancestor (agent/terminal/shell) must
+        // error out, not SIGSTOP — a stopped process can't call wake back
+        let own = std::process::id() as i32;
+        let ppid = caproom_core::collector::snapshot_current_user()
+            .ppid_map()
+            .get(&own)
+            .copied();
+        for v in [handle_park(own), handle_park_tree(own)] {
+            assert!(v.get("error").is_some(), "self pid must be refused, got {}", v);
+        }
+        if let Some(parent) = ppid {
+            if parent > 1 {
+                for v in [handle_park(parent), handle_park_tree(parent)] {
+                    assert!(
+                        v.get("error").is_some(),
+                        "ancestor pid must be refused, got {}",
+                        v
+                    );
+                }
+            }
+        }
     }
     #[test]
     fn invalid_pid_rejected_without_signalling() {
