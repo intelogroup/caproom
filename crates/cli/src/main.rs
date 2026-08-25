@@ -126,7 +126,7 @@ fn main() {
     }
     let cli = Cli::parse(); // allow `caproom --limit 2048 -- npm run build` compat: treat remaining args as run
                             // clap handles subcommand; for direct exec without `run` keyword, fallback handled below
-    // resolve global offload vs run-local
+                            // resolve global offload vs run-local
     let global_offload = cli.offload.clone();
     match cli.cmd {
         Some(Cmd::Freemem) => println!("{}", pressure::free_mem_pct()),
@@ -137,7 +137,11 @@ fn main() {
         }) => cmd_top(json, pid, park_min_mb),
         Some(Cmd::Park { pid }) => cmd_park(pid),
         Some(Cmd::ParkTree { pid }) => cmd_park_tree(pid),
-        Some(Cmd::Wake { pid, headroom, retrieve }) => cmd_wake(pid, headroom, retrieve),
+        Some(Cmd::Wake {
+            pid,
+            headroom,
+            retrieve,
+        }) => cmd_wake(pid, headroom, retrieve),
         Some(Cmd::WakeTree { pid }) => cmd_wake_tree(pid),
         Some(Cmd::Status { pid }) => cmd_status(pid),
         Some(Cmd::Calibrate { duration }) => cmd_calibrate(duration),
@@ -305,12 +309,18 @@ fn cmd_wake(pid: Option<i32>, headroom: Option<String>, retrieve: Option<String>
                 // write to stdout bare (byte-exact), stderr logs hash
                 use std::io::Write;
                 let _ = std::io::stdout().write_all(&data);
-                eprintln!("caproom: retrieved headroom:{} ({} bytes, byte-exact)", &bare[..bare.len().min(8)], data.len());
+                eprintln!(
+                    "caproom: retrieved headroom:{} ({} bytes, byte-exact)",
+                    &bare[..bare.len().min(8)],
+                    data.len()
+                );
                 // if offload was a parked tree, also SIGCONT the pid if known from payload?
                 // try to wake pid if provided, otherwise just retrieve
                 if let Some(p) = pid {
                     if valid_pid(p) {
-                        unsafe { libc::kill(p, libc::SIGCONT); }
+                        unsafe {
+                            libc::kill(p, libc::SIGCONT);
+                        }
                     }
                 }
             }
@@ -471,7 +481,12 @@ fn cmd_retrieve(hash: String, out: Option<String>) {
                     eprintln!("caproom: write {} failed: {}", path, e);
                     std::process::exit(1);
                 });
-                eprintln!("caproom: retrieved headroom:{} → {} ({} bytes)", &bare[..bare.len().min(8)], path, data.len());
+                eprintln!(
+                    "caproom: retrieved headroom:{} → {} ({} bytes)",
+                    &bare[..bare.len().min(8)],
+                    path,
+                    data.len()
+                );
             } else {
                 use std::io::Write;
                 let _ = std::io::stdout().write_all(&data);
@@ -567,7 +582,11 @@ fn cmd_run(cmd: Vec<String>, limit_mb: u64, interval: f64, grace: u64, offload: 
     };
     #[cfg(not(target_os = "macos"))]
     let pressure_note = "poll";
-    let offload_note = if offload.as_deref() == Some("headroom") { " offload=headroom" } else { "" };
+    let offload_note = if offload.as_deref() == Some("headroom") {
+        " offload=headroom"
+    } else {
+        ""
+    };
     eprintln!("caproom: watchdog limit={}MB effective={}MB (free {}%) {} poll={}s grace={}s{} — phys_footprint", limit_mb, eff, free0, pressure_note, interval, grace, offload_note);
     // fork exec
     let mut child = std::process::Command::new(&cmd[0])
@@ -664,18 +683,39 @@ fn cmd_run(cmd: Vec<String>, limit_mb: u64, interval: f64, grace: u64, offload: 
                     std::thread::sleep(std::time::Duration::from_millis(600));
                     let snap2 = collector::snapshot_current_user();
                     let ppid_map2 = snap2.ppid_map();
-                    let states2: HashMap<i32, char> = snap2.procs.iter().map(|p| (p.pid, p.state)).collect();
-                    let foot2: HashMap<i32, u64> = snap2.procs.iter().map(|p| (p.pid, p.footprint_kb)).collect();
-                    let leaders2: HashMap<i32, bool> = snap2.procs.iter().map(|p| {
-                        let is_leader = if p.sid != 0 { p.pid == p.sid } else { p.pid == p.pgid };
-                        (p.pid, is_leader)
-                    }).collect();
+                    let states2: HashMap<i32, char> =
+                        snap2.procs.iter().map(|p| (p.pid, p.state)).collect();
+                    let foot2: HashMap<i32, u64> = snap2
+                        .procs
+                        .iter()
+                        .map(|p| (p.pid, p.footprint_kb))
+                        .collect();
+                    let leaders2: HashMap<i32, bool> = snap2
+                        .procs
+                        .iter()
+                        .map(|p| {
+                            let is_leader = if p.sid != 0 {
+                                p.pid == p.sid
+                            } else {
+                                p.pid == p.pgid
+                            };
+                            (p.pid, is_leader)
+                        })
+                        .collect();
                     let cpu2: HashMap<i32, f32> = {
                         let mut ring = cli_cpu().lock().unwrap();
-                        snap2.procs.iter().map(|p| {
-                            let d = if p.cpu_time_ns == 0 { 1.0 } else { ring.update(p.pid, p.cpu_time_ns) };
-                            (p.pid, d)
-                        }).collect()
+                        snap2
+                            .procs
+                            .iter()
+                            .map(|p| {
+                                let d = if p.cpu_time_ns == 0 {
+                                    1.0
+                                } else {
+                                    ring.update(p.pid, p.cpu_time_ns)
+                                };
+                                (p.pid, d)
+                            })
+                            .collect()
                     };
                     if let Some(tree2) = Tree::build(pid, &snap2) {
                         let view2 = TreeView {
@@ -686,7 +726,12 @@ fn cmd_run(cmd: Vec<String>, limit_mb: u64, interval: f64, grace: u64, offload: 
                             is_session_leader: &leaders2,
                             cpu_delta: &cpu2,
                         };
-                        let idle2: Vec<i32> = tree2.pids.iter().copied().filter(|p| is_idle_subtree(*p, pid, &view2, &ppid_map2)).collect();
+                        let idle2: Vec<i32> = tree2
+                            .pids
+                            .iter()
+                            .copied()
+                            .filter(|p| is_idle_subtree(*p, pid, &view2, &ppid_map2))
+                            .collect();
                         if !idle2.is_empty() {
                             idle = idle2;
                         }
@@ -697,7 +742,11 @@ fn cmd_run(cmd: Vec<String>, limit_mb: u64, interval: f64, grace: u64, offload: 
                     // ~67% on log-shaped text, retrieve bare then filter self (headroom bug note)
                     // Dedup: if already stashed for this root, reuse hash instead of spamming new files
                     let mut stash_hash: Option<String> = None;
-                    let already = if offload_enabled { caproom_core::offload::hash_for_pid(pid) } else { None };
+                    let already = if offload_enabled {
+                        caproom_core::offload::hash_for_pid(pid)
+                    } else {
+                        None
+                    };
                     if offload_enabled && already.is_none() {
                         // will stash after freeze; keep None until after SIGSTOP
                     } else if let Some(h) = already {
@@ -712,7 +761,11 @@ fn cmd_run(cmd: Vec<String>, limit_mb: u64, interval: f64, grace: u64, offload: 
                     #[cfg(windows)]
                     for _ in &idle {}
                     if offload_enabled && stash_hash.is_none() {
-                        let payload = format!("idle {} pids footprint {}KB log+snapshot", idle.len(), tree.footprint_kb);
+                        let payload = format!(
+                            "idle {} pids footprint {}KB log+snapshot",
+                            idle.len(),
+                            tree.footprint_kb
+                        );
                         match caproom_core::offload::compress_snapshot(pid, payload.as_bytes()) {
                             Ok(h) => {
                                 stash_hash = Some(h.clone());
@@ -728,7 +781,10 @@ fn cmd_run(cmd: Vec<String>, limit_mb: u64, interval: f64, grace: u64, offload: 
                         pid
                     );
                     if let Some(ref h) = stash_hash {
-                        eprintln!("caproom: offload headroom:{} (park kept)", &h[..h.len().min(8)]);
+                        eprintln!(
+                            "caproom: offload headroom:{} (park kept)",
+                            &h[..h.len().min(8)]
+                        );
                     }
                     std::thread::sleep(std::time::Duration::from_secs(1));
                     if let Some(cur) = Tree::build(pid, &collector::snapshot_current_user()) {

@@ -83,18 +83,14 @@ mod tests {
         assert!(!still_in_tree(102, 100, &map));
     }
 
-    fn idle_view(
-        pid: i32,
-        state: char,
-        footprint_kb: u64,
-        cpu: f32,
-        leader: bool,
-    ) -> (
+    type IdleViewMaps = (
         HashMap<i32, char>,
         HashMap<i32, u64>,
         HashMap<i32, bool>,
         HashMap<i32, f32>,
-    ) {
+    );
+
+    fn idle_view(pid: i32, state: char, footprint_kb: u64, cpu: f32, leader: bool) -> IdleViewMaps {
         let mut states = HashMap::new();
         states.insert(pid, state);
         let mut foot = HashMap::new();

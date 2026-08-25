@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 /// - caller must filter self after bare retrieve (do not pass query to retrieve)
 /// - ~67% on log-shaped text is achieved by plain storage (log text compresses if caller gzips;
 ///   we store verbatim and report virtual compressed size 33% for parity)
-
 fn store_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("CAPROOM_HEADROOM_DIR") {
         return PathBuf::from(dir);
@@ -93,7 +92,13 @@ pub fn compress_bytes(pid: i32, data: &[u8]) -> Result<String, String> {
 /// Caller must filter self. Mirrors `headroom_retrieve(hash)` no query.
 pub fn retrieve(hash: &str) -> Result<Vec<u8>, String> {
     let p = hash_path(hash);
-    std::fs::read(&p).map_err(|e| format!("headroom retrieve {} missing: {}", &hash[..hash.len().min(8)], e))
+    std::fs::read(&p).map_err(|e| {
+        format!(
+            "headroom retrieve {} missing: {}",
+            &hash[..hash.len().min(8)],
+            e
+        )
+    })
 }
 
 pub fn retrieve_to(dest: &Path, hash: &str) -> Result<Vec<u8>, String> {
@@ -148,7 +153,10 @@ mod tests {
         let data = b"log line repeated log line repeated log line repeated ".repeat(100);
         let hash = compress_bytes(pid, &data).expect("compress");
         let out = retrieve(&hash).expect("retrieve");
-        assert_eq!(out, data, "retrieve must be byte-exact (no query filtering)");
+        assert_eq!(
+            out, data,
+            "retrieve must be byte-exact (no query filtering)"
+        );
         // bare retrieve then filter self: caller would filter, not lib
         // cleanup
         let _ = std::fs::remove_file(hash_path(&hash));

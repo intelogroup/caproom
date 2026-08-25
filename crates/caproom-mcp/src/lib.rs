@@ -310,7 +310,11 @@ mod tests {
             .get(&own)
             .copied();
         for v in [handle_park(own), handle_park_tree(own)] {
-            assert!(v.get("error").is_some(), "self pid must be refused, got {}", v);
+            assert!(
+                v.get("error").is_some(),
+                "self pid must be refused, got {}",
+                v
+            );
         }
         if let Some(parent) = ppid {
             if parent > 1 {
