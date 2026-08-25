@@ -1,6 +1,7 @@
 pub mod collector;
 pub mod cpu;
 pub mod growth;
+pub mod offload;
 pub mod policy;
 pub mod pressure;
 pub mod process_tree;

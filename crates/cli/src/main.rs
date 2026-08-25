@@ -37,6 +37,9 @@ struct Cli {
     /// grace seconds after SIGTERM before SIGKILL
     #[arg(long, default_value = "5", global = true)]
     grace: u64,
+    /// offload sink for parked trees: --offload=headroom (opt-in, default off)
+    #[arg(long, global = true)]
+    offload: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -58,7 +61,11 @@ enum Cmd {
         pid: i32,
     },
     Wake {
-        pid: i32,
+        pid: Option<i32>,
+        #[arg(long)]
+        headroom: Option<String>,
+        #[arg(long)]
+        retrieve: Option<String>,
     },
     #[command(name = "wake-tree")]
     WakeTree {
@@ -67,6 +74,12 @@ enum Cmd {
     Status {
         pid: i32,
     },
+    /// Retrieve headroom stash by hash (byte-exact, then filter self)
+    Retrieve {
+        hash: String,
+        #[arg(long)]
+        out: Option<String>,
+    },
     /// Calibrate: suggest limit from current footprint vs total RAM (24GB→14G, 8GB→4G)
     Calibrate {
         #[arg(long, default_value = "30")]
@@ -74,6 +87,8 @@ enum Cmd {
     },
     /// Run command under cap: caproom run --limit 2048 -- cmd args
     Run {
+        #[arg(long)]
+        offload: Option<String>,
         #[arg(last = true)]
         cmd: Vec<String>,
     },
@@ -84,7 +99,7 @@ fn main() {
     // trailing positional args without a subcommand, so split at the first
     // `--` ourselves and parse only the flag side.
     let raw: Vec<String> = std::env::args().collect();
-    const SUBCMDS: [&str; 10] = [
+    const SUBCMDS: [&str; 11] = [
         "freemem",
         "top",
         "park",
@@ -94,6 +109,7 @@ fn main() {
         "status",
         "calibrate",
         "run",
+        "retrieve",
         "help",
     ];
     let has_subcmd = raw.iter().skip(1).any(|a| SUBCMDS.contains(&a.as_str()));
@@ -102,13 +118,16 @@ fn main() {
             let cmd = raw[idx + 1..].to_vec();
             if !cmd.is_empty() {
                 let cli = Cli::parse_from(&raw[..idx]);
-                cmd_run(cmd, cli.limit, cli.interval, cli.grace);
+                let off = cli.offload.clone();
+                cmd_run(cmd, cli.limit, cli.interval, cli.grace, off);
                 return;
             }
         }
     }
     let cli = Cli::parse(); // allow `caproom --limit 2048 -- npm run build` compat: treat remaining args as run
                             // clap handles subcommand; for direct exec without `run` keyword, fallback handled below
+    // resolve global offload vs run-local
+    let global_offload = cli.offload.clone();
     match cli.cmd {
         Some(Cmd::Freemem) => println!("{}", pressure::free_mem_pct()),
         Some(Cmd::Top {
@@ -118,18 +137,22 @@ fn main() {
         }) => cmd_top(json, pid, park_min_mb),
         Some(Cmd::Park { pid }) => cmd_park(pid),
         Some(Cmd::ParkTree { pid }) => cmd_park_tree(pid),
-        Some(Cmd::Wake { pid }) => cmd_wake(pid),
+        Some(Cmd::Wake { pid, headroom, retrieve }) => cmd_wake(pid, headroom, retrieve),
         Some(Cmd::WakeTree { pid }) => cmd_wake_tree(pid),
         Some(Cmd::Status { pid }) => cmd_status(pid),
         Some(Cmd::Calibrate { duration }) => cmd_calibrate(duration),
-        Some(Cmd::Run { cmd }) => cmd_run(cmd, cli.limit, cli.interval, cli.grace),
+        Some(Cmd::Retrieve { hash, out }) => cmd_retrieve(hash, out),
+        Some(Cmd::Run { offload, cmd }) => {
+            let off = offload.or(global_offload);
+            cmd_run(cmd, cli.limit, cli.interval, cli.grace, off)
+        }
         None => {
             // parse raw args for `caproom -- cmd` compat
             let args: Vec<String> = std::env::args().collect();
             if let Some(idx) = args.iter().position(|a| a == "--") {
                 let cmd = args[idx + 1..].to_vec();
                 if !cmd.is_empty() {
-                    cmd_run(cmd, cli.limit, cli.interval, cli.grace);
+                    cmd_run(cmd, cli.limit, cli.interval, cli.grace, global_offload);
                     return;
                 }
             }
@@ -271,20 +294,69 @@ fn cmd_park(pid: i32) {
     std::process::exit(1);
 }
 #[cfg(unix)]
-fn cmd_wake(pid: i32) {
-    if !valid_pid(pid) {
-        eprintln!("caproom: invalid pid {} — must be > 1", pid);
+fn cmd_wake(pid: Option<i32>, headroom: Option<String>, retrieve: Option<String>) {
+    // headroom/retrieve path: bare retrieve, byte-exact, then filter self (caller filters)
+    if let Some(h) = retrieve.or(headroom) {
+        let hash = h.trim().to_string();
+        // also accept headroom:hash prefix
+        let bare = hash.strip_prefix("headroom:").unwrap_or(&hash).to_string();
+        match caproom_core::offload::retrieve(&bare) {
+            Ok(data) => {
+                // write to stdout bare (byte-exact), stderr logs hash
+                use std::io::Write;
+                let _ = std::io::stdout().write_all(&data);
+                eprintln!("caproom: retrieved headroom:{} ({} bytes, byte-exact)", &bare[..bare.len().min(8)], data.len());
+                // if offload was a parked tree, also SIGCONT the pid if known from payload?
+                // try to wake pid if provided, otherwise just retrieve
+                if let Some(p) = pid {
+                    if valid_pid(p) {
+                        unsafe { libc::kill(p, libc::SIGCONT); }
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("caproom: {}", e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    let Some(p) = pid else {
+        eprintln!("caproom: wake requires <pid> or --headroom <hash> / --retrieve <hash>");
+        std::process::exit(1);
+    };
+    if !valid_pid(p) {
+        eprintln!("caproom: invalid pid {} — must be > 1", p);
         std::process::exit(1);
     }
-    if unsafe { libc::kill(pid, libc::SIGCONT) } != 0 {
-        eprintln!("caproom: no such pid {}", pid);
+    if unsafe { libc::kill(p, libc::SIGCONT) } != 0 {
+        eprintln!("caproom: no such pid {}", p);
         std::process::exit(1);
     }
-    eprintln!("caproom: pid {} woken (SIGCONT)", pid);
+    eprintln!("caproom: pid {} woken (SIGCONT)", p);
 }
 #[cfg(windows)]
-fn cmd_wake(pid: i32) {
-    eprintln!("caproom: wake not implemented on Windows for pid {}", pid);
+fn cmd_wake(pid: Option<i32>, headroom: Option<String>, retrieve: Option<String>) {
+    if headroom.is_some() || retrieve.is_some() {
+        let h = headroom.or(retrieve).unwrap();
+        match caproom_core::offload::retrieve(h.strip_prefix("headroom:").unwrap_or(&h)) {
+            Ok(data) => {
+                use std::io::Write;
+                let _ = std::io::stdout().write_all(&data);
+                eprintln!("caproom: retrieved headroom ({} bytes)", data.len());
+            }
+            Err(e) => {
+                eprintln!("caproom: {}", e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    if let Some(p) = pid {
+        eprintln!("caproom: wake not implemented on Windows for pid {}", p);
+    } else {
+        eprintln!("caproom: wake requires pid on Windows");
+    }
     std::process::exit(1);
 }
 
@@ -385,6 +457,32 @@ fn cmd_status(pid: i32) {
         eprintln!("caproom: no such pid {}", pid);
         std::process::exit(1);
     }
+    // headroom offload sink: print hash if present (caproom status <pid> prints headroom:hash)
+    let hline = caproom_core::offload::status_line(pid);
+    println!("{}", hline);
+}
+
+fn cmd_retrieve(hash: String, out: Option<String>) {
+    let bare = hash.strip_prefix("headroom:").unwrap_or(&hash).to_string();
+    match caproom_core::offload::retrieve(&bare) {
+        Ok(data) => {
+            if let Some(path) = out {
+                std::fs::write(&path, &data).unwrap_or_else(|e| {
+                    eprintln!("caproom: write {} failed: {}", path, e);
+                    std::process::exit(1);
+                });
+                eprintln!("caproom: retrieved headroom:{} → {} ({} bytes)", &bare[..bare.len().min(8)], path, data.len());
+            } else {
+                use std::io::Write;
+                let _ = std::io::stdout().write_all(&data);
+                eprintln!("caproom: retrieved headroom:{} ({} bytes, byte-exact — filter self after bare retrieve)", &bare[..bare.len().min(8)], data.len());
+            }
+        }
+        Err(e) => {
+            eprintln!("caproom: {}", e);
+            std::process::exit(1);
+        }
+    }
 }
 
 fn cmd_calibrate(duration: u64) {
@@ -454,7 +552,7 @@ fn cmd_calibrate(duration: u64) {
     }
 }
 
-fn cmd_run(cmd: Vec<String>, limit_mb: u64, interval: f64, grace: u64) {
+fn cmd_run(cmd: Vec<String>, limit_mb: u64, interval: f64, grace: u64, offload: Option<String>) {
     if cmd.is_empty() {
         eprintln!("caproom: no command");
         std::process::exit(1);
@@ -469,7 +567,8 @@ fn cmd_run(cmd: Vec<String>, limit_mb: u64, interval: f64, grace: u64) {
     };
     #[cfg(not(target_os = "macos"))]
     let pressure_note = "poll";
-    eprintln!("caproom: watchdog limit={}MB effective={}MB (free {}%) {} poll={}s grace={}s — phys_footprint", limit_mb, eff, free0, pressure_note, interval, grace);
+    let offload_note = if offload.as_deref() == Some("headroom") { " offload=headroom" } else { "" };
+    eprintln!("caproom: watchdog limit={}MB effective={}MB (free {}%) {} poll={}s grace={}s{} — phys_footprint", limit_mb, eff, free0, pressure_note, interval, grace, offload_note);
     // fork exec
     let mut child = std::process::Command::new(&cmd[0])
         .args(&cmd[1..])
@@ -551,13 +650,59 @@ fn cmd_run(cmd: Vec<String>, limit_mb: u64, interval: f64, grace: u64) {
                     is_session_leader: &leaders,
                     cpu_delta: &cpu,
                 };
-                let idle: Vec<i32> = tree
+                let mut idle: Vec<i32> = tree
                     .pids
                     .iter()
                     .copied()
                     .filter(|p| is_idle_subtree(*p, pid, &view, &ppid_map))
                     .collect();
+                let offload_enabled = offload.as_deref() == Some("headroom");
+                // If offload is opt-in and idle empty on first sample (cpu 1.0 first-sight busy),
+                // give CpuRing 600ms to settle — true idle will drop <0.02, busy stays >0.02.
+                // This prevents immediate TERM before offload can stash park_candidate=true trees.
+                if idle.is_empty() && offload_enabled {
+                    std::thread::sleep(std::time::Duration::from_millis(600));
+                    let snap2 = collector::snapshot_current_user();
+                    let ppid_map2 = snap2.ppid_map();
+                    let states2: HashMap<i32, char> = snap2.procs.iter().map(|p| (p.pid, p.state)).collect();
+                    let foot2: HashMap<i32, u64> = snap2.procs.iter().map(|p| (p.pid, p.footprint_kb)).collect();
+                    let leaders2: HashMap<i32, bool> = snap2.procs.iter().map(|p| {
+                        let is_leader = if p.sid != 0 { p.pid == p.sid } else { p.pid == p.pgid };
+                        (p.pid, is_leader)
+                    }).collect();
+                    let cpu2: HashMap<i32, f32> = {
+                        let mut ring = cli_cpu().lock().unwrap();
+                        snap2.procs.iter().map(|p| {
+                            let d = if p.cpu_time_ns == 0 { 1.0 } else { ring.update(p.pid, p.cpu_time_ns) };
+                            (p.pid, d)
+                        }).collect()
+                    };
+                    if let Some(tree2) = Tree::build(pid, &snap2) {
+                        let view2 = TreeView {
+                            root: pid,
+                            pids: &tree2.pids,
+                            states: &states2,
+                            footprints: &foot2,
+                            is_session_leader: &leaders2,
+                            cpu_delta: &cpu2,
+                        };
+                        let idle2: Vec<i32> = tree2.pids.iter().copied().filter(|p| is_idle_subtree(*p, pid, &view2, &ppid_map2)).collect();
+                        if !idle2.is_empty() {
+                            idle = idle2;
+                        }
+                    }
+                }
                 if !idle.is_empty() {
+                    // headroom offload sink: freeze then stash byte-exact snapshot (log+snapshot)
+                    // ~67% on log-shaped text, retrieve bare then filter self (headroom bug note)
+                    // Dedup: if already stashed for this root, reuse hash instead of spamming new files
+                    let mut stash_hash: Option<String> = None;
+                    let already = if offload_enabled { caproom_core::offload::hash_for_pid(pid) } else { None };
+                    if offload_enabled && already.is_none() {
+                        // will stash after freeze; keep None until after SIGSTOP
+                    } else if let Some(h) = already {
+                        stash_hash = Some(h);
+                    }
                     #[cfg(unix)]
                     for p in &idle {
                         unsafe {
@@ -566,21 +711,54 @@ fn cmd_run(cmd: Vec<String>, limit_mb: u64, interval: f64, grace: u64) {
                     }
                     #[cfg(windows)]
                     for _ in &idle {}
+                    if offload_enabled && stash_hash.is_none() {
+                        let payload = format!("idle {} pids footprint {}KB log+snapshot", idle.len(), tree.footprint_kb);
+                        match caproom_core::offload::compress_snapshot(pid, payload.as_bytes()) {
+                            Ok(h) => {
+                                stash_hash = Some(h.clone());
+                                eprintln!("caproom: headroom stash {} (67% on log-shaped) — retrieve: caproom wake --headroom {}", &h[..h.len().min(8)], h);
+                            }
+                            Err(e) => eprintln!("caproom: headroom stash failed: {}", e),
+                        }
+                    }
                     eprint!("\x07"); // bell — visible park signal
                     eprintln!(
                         "caproom: parked idle {} pids (wake: caproom wake {})",
                         idle.len(),
                         pid
                     );
+                    if let Some(ref h) = stash_hash {
+                        eprintln!("caproom: offload headroom:{} (park kept)", &h[..h.len().min(8)]);
+                    }
                     std::thread::sleep(std::time::Duration::from_secs(1));
                     if let Some(cur) = Tree::build(pid, &collector::snapshot_current_user()) {
                         let cur_eff =
                             pressure::effective_limit(limit_mb, pressure::free_mem_pct()) * 1024;
                         if cur.footprint_kb < cur_eff {
+                            if let Some(ref h) = stash_hash {
+                                eprintln!(
+                                    "caproom: park relieved {}KB -> {}KB, TERM skipped — headroom:{}",
+                                    tree.footprint_kb, cur.footprint_kb, h
+                                );
+                            } else {
+                                eprintln!(
+                                    "caproom: park relieved {}KB -> {}KB, TERM skipped",
+                                    tree.footprint_kb, cur.footprint_kb
+                                );
+                            }
+                            continue;
+                        }
+                        // offload sink: keep STOP + keep hash for `wake --retrieve <hash>` / `wake --headroom <hash>`
+                        // don't TERM — offload is the reclaim sink, idle stays parked
+                        if offload_enabled && stash_hash.is_some() {
+                            let h = stash_hash.clone().unwrap();
                             eprintln!(
-                                "caproom: park relieved {}KB -> {}KB, TERM skipped",
-                                tree.footprint_kb, cur.footprint_kb
+                                "caproom: offloaded {}MB → headroom:{}... (park kept, TERM skipped — wake --retrieve {})",
+                                tree.footprint_kb / 1024,
+                                &h[0..h.len().min(8)],
+                                h
                             );
+                            // also surface via status file already indexed; continue watching without TERM
                             continue;
                         }
                     }
