@@ -34,8 +34,8 @@ jobs:
         run: |
           set +e
           ./target/debug/caproom run --limit 100 --grace 2 -- node test/hog.js > /tmp/single.log 2>&1
-          cat /tmp/single.log
           CODE=$?
+          cat /tmp/single.log
           [ "$CODE" -ne 0 ] || { echo "FAIL: hog not capped"; exit 1; }
           sleep 1
           SURV=$(pgrep -f 'Buffer.alloc' | wc -l | tr -d ' ')
@@ -47,8 +47,8 @@ jobs:
           set +e
           # tree total ~270MB across 3 children — cap below that so the TREE breaches
           ./target/debug/caproom run --limit 200 --grace 2 -- node test/tree-hog.js > /tmp/tree.log 2>&1
-          cat /tmp/tree.log
           CODE=$?
+          cat /tmp/tree.log
           [ "$CODE" -ne 0 ] || { echo "FAIL: tree not killed"; exit 1; }
           sleep 1
           SURV=$(pgrep -f 'Buffer.alloc' | wc -l | tr -d ' ')
@@ -58,8 +58,9 @@ jobs:
         run: |
           set +e
           ./target/debug/caproom run --limit 100 --grace 2 -- node test/stubborn-hog.js > /tmp/stubborn.log 2>&1
+          CODE=$?
           cat /tmp/stubborn.log
-          [ $? -ne 0 ] || { echo "FAIL: cap not enforced"; exit 1; }
+          [ "$CODE" -ne 0 ] || { echo "FAIL: cap not enforced"; exit 1; }
           sleep 1
           SURV=$(pgrep -f 'Buffer.alloc' | wc -l | tr -d ' ')
           echo "survivors=$SURV"
