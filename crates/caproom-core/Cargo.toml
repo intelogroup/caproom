@@ -3,6 +3,7 @@ name = "caproom-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Core policy, collector, and process-tree logic for caproom — memory-cap enforcement for any command"
 
 [dependencies]
 serde = { workspace = true }

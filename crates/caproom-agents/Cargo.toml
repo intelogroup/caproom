@@ -3,6 +3,7 @@ name = "caproom-agents"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Agent-oriented process tracking helpers for caproom"
 
 [dependencies]
 caproom-core = { path = "../caproom-core" }
