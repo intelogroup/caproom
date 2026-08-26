@@ -10,6 +10,8 @@ use std::collections::HashMap;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 
+mod warn_drop;
+
 /// Poll interval seconds — negative or zero would panic Duration::from_millis
 fn parse_interval(s: &str) -> Result<f64, String> {
     let v: f64 = s.parse().map_err(|e| format!("invalid interval: {}", e))?;
@@ -588,7 +590,9 @@ fn cmd_run(cmd: Vec<String>, limit_mb: u64, interval: f64, grace: u64, offload: 
         ""
     };
     eprintln!("caproom: watchdog limit={}MB effective={}MB (free {}%) {} poll={}s grace={}s{} — phys_footprint", limit_mb, eff, free0, pressure_note, interval, grace, offload_note);
-    // fork exec
+    // fork exec — plain inherited stdio, no pty layer. The watchdog never touches the
+    // child's terminal; a RAM warning is dropped as a file for the UserPromptSubmit hook
+    // to surface on the user's own next prompt (see warn_drop::maybe_warn below).
     let mut child = std::process::Command::new(&cmd[0])
         .args(&cmd[1..])
         .spawn()
@@ -596,6 +600,7 @@ fn cmd_run(cmd: Vec<String>, limit_mb: u64, interval: f64, grace: u64, offload: 
     let pid = child.id() as i32;
     let limit_kb = eff * 1024;
     let interval_d = std::time::Duration::from_millis((interval * 1000.0) as u64);
+    let mut ram_warned = false;
     loop {
         std::thread::sleep(interval_d);
         if let Ok(Some(status)) = child.try_wait() {
@@ -613,6 +618,20 @@ fn cmd_run(cmd: Vec<String>, limit_mb: u64, interval: f64, grace: u64, offload: 
         if let Some(tree) = Tree::build(pid, &snap) {
             let free = pressure::free_mem_pct();
             let eff_kb = pressure::effective_limit(limit_mb, free) * 1024;
+            // Pre-breach warning: at 85% of cap, drop a file the UserPromptSubmit hook picks
+            // up and surfaces as additionalContext on the user's own next prompt — no touching
+            // the child's stdin/terminal, agent just sees it like any other injected context.
+            // Hysteresis: re-arms once usage drops back under 70%, so it doesn't warn once
+            // and then go silent for the rest of a session that stays pinned near the cap.
+            let warn_kb = eff_kb * 85 / 100;
+            let rearm_kb = eff_kb * 70 / 100;
+            if !ram_warned && tree.footprint_kb >= warn_kb {
+                warn_drop::write_warning(pid, tree.footprint_kb, eff_kb, free);
+                eprint!("\x07");
+                ram_warned = true;
+            } else if ram_warned && tree.footprint_kb < rearm_kb {
+                ram_warned = false;
+            }
             // growth trigger via shared history ring (same as MCP): >200 KB/s sustained
             let growth_kb_s = {
                 let mut rg = cli_growth().lock().unwrap();
