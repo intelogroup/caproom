@@ -54,7 +54,7 @@ dependencies = [
 
 [[package]]
 name = "caproom"
-version = "0.9.2"
+version = "0.9.3"
 dependencies = [
  "caproom-agents",
  "caproom-core",
@@ -66,7 +66,7 @@ dependencies = [
 
 [[package]]
 name = "caproom-agents"
-version = "0.9.2"
+version = "0.9.3"
 dependencies = [
  "caproom-core",
  "serde",
@@ -74,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "caproom-core"
-version = "0.9.2"
+version = "0.9.3"
 dependencies = [
  "libc",
  "serde",
@@ -83,7 +83,7 @@ dependencies = [
 
 [[package]]
 name = "caproom-daemon"
-version = "0.9.2"
+version = "0.9.3"
 dependencies = [
  "caproom-core",
  "libc",
@@ -93,7 +93,7 @@ dependencies = [
 
 [[package]]
 name = "caproom-mcp"
-version = "0.9.2"
+version = "0.9.3"
 dependencies = [
  "caproom-core",
  "libc",
