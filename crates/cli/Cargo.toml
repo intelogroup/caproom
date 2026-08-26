@@ -6,8 +6,8 @@ license.workspace = true
 description = "Memory-cap any command — Rust port, CLI-first v1"
 
 [dependencies]
-caproom-core = { path = "../caproom-core" }
-caproom-agents = { path = "../caproom-agents" }
+caproom-core = { path = "../caproom-core", version = "0.9.4" }
+caproom-agents = { path = "../caproom-agents", version = "0.9.4" }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

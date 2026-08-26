@@ -6,7 +6,7 @@ license.workspace = true
 description = "caproom MCP — pull-only, strictly typed enums (no push)"
 
 [dependencies]
-caproom-core = { path = "../caproom-core" }
+caproom-core = { path = "../caproom-core", version = "0.9.4" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 libc = { workspace = true }

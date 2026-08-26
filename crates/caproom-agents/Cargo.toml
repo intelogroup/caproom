@@ -6,5 +6,5 @@ license.workspace = true
 description = "Agent-oriented process tracking helpers for caproom"
 
 [dependencies]
-caproom-core = { path = "../caproom-core" }
+caproom-core = { path = "../caproom-core", version = "0.9.4" }
 serde = { workspace = true }
